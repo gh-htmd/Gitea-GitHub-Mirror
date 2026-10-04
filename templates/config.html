@@ -12,6 +12,7 @@
   </p>
   <form method="post" action="{{ url_for('config_post') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <h2>Mirror</h2>
     {% for f in fields %}
     <div class="field">
       <label for="f-{{ f['key'] }}">{{ f["label"] }}
@@ -25,23 +26,50 @@
                  {% if f["readonly"] %}disabled{% endif %}>
           enabled
         </label>
-      {% elif f["type"] == "select" %}
+      {% elif f["type"] in ["select", "notify_mode"] %}
         <select id="f-{{ f['key'] }}" name="{{ f['key'] }}" {% if f["readonly"] %}disabled{% endif %}>
-          {% for opt in ["push", "pull", "both"] %}
+          {% for opt in f["options"] %}
           <option value="{{ opt }}" {% if f["value"] == opt %}selected{% endif %}>{{ opt }}</option>
           {% endfor %}
         </select>
       {% else %}
-        <input type="{{ f['type'] }}" id="f-{{ f['key'] }}" name="{{ f['key'] }}"
+        <input type="{{ f['type'] if f['type'] in ['text','password'] else 'text' }}"
+               id="f-{{ f['key'] }}" name="{{ f['key'] }}"
                {% if f["type"] != "password" %}value="{{ f['value'] }}"{% endif %}
                {% if f["type"] == "password" %}placeholder="{% if f['is_set'] %}•••••••• (set — blank keeps it){% else %}not set{% endif %}" autocomplete="new-password"{% endif %}
                {% if f["readonly"] %}readonly{% endif %}>
       {% endif %}
-      {% if f["key"] == "ENCRYPTION_PASSPHRASE" %}
-        <div class="hint">The shared key used for repos without a custom per-repo key (see Repositories).</div>
-      {% elif f["key"] == "SYNC_DIRECTION" %}
-        <div class="hint">Which direction the scheduled sync runs.</div>
+      {% if f["hint"] %}<div class="hint">{{ f["hint"] }}</div>{% endif %}
+    </div>
+    {% endfor %}
+
+    <h2 style="margin-top:26px;">Notifications</h2>
+    <p class="muted">
+      {% if notify_channels %}
+        Active channels: {% for c in notify_channels %}<span class="pill ok">{{ c }}</span> {% endfor %}
+      {% else %}
+        <span class="pill mut">no channels configured</span>
       {% endif %}
+    </p>
+    {% for f in notify_fields %}
+    <div class="field">
+      <label for="f-{{ f['key'] }}">{{ f["label"] }}
+        <span class="src {{ f['source'] }}">{{ f["source"] }}</span>
+      </label>
+      {% if f["type"] in ["select", "notify_mode"] %}
+        <select id="f-{{ f['key'] }}" name="{{ f['key'] }}" {% if f["readonly"] %}disabled{% endif %}>
+          {% for opt in f["options"] %}
+          <option value="{{ opt }}" {% if f["value"] == opt %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input type="{{ f['type'] if f['type'] in ['text','password'] else 'text' }}"
+               id="f-{{ f['key'] }}" name="{{ f['key'] }}"
+               {% if f["type"] != "password" %}value="{{ f['value'] }}"{% endif %}
+               {% if f["type"] == "password" %}placeholder="{% if f['is_set'] %}•••••••• (set — blank keeps it){% else %}not set{% endif %}" autocomplete="new-password"{% endif %}
+               {% if f["readonly"] %}readonly{% endif %}>
+      {% endif %}
+      {% if f["hint"] %}<div class="hint">{{ f["hint"] }}</div>{% endif %}
     </div>
     {% endfor %}
 
@@ -56,6 +84,10 @@
     </div>
 
     <button class="btn primary" type="submit">Save configuration</button>
+  </form>
+  <form method="post" action="{{ url_for('test_notify') }}" style="margin-top:12px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="btn" type="submit">🔔 Send test notification</button>
   </form>
 </div>
 {% endblock %}

@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import crypto
+import notify
 
 try:
     import mirror
@@ -79,7 +80,7 @@ except ImportError:  # pragma: no cover - standalone fallback
     _MIRROR_AVAILABLE = False
     mirror = None  # type: ignore
 
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 ENV_FILE = SCRIPT_DIR / ".env"
@@ -563,6 +564,7 @@ def push_encrypted_repo(
             start,
             "success",
             f"pushed {len(encrypted)} encrypted bytes ({ref_count} refs)",
+            extra={"bytes": len(encrypted)},
         )
     except GitError as e:
         return _result(repo_name, start, "failed", f"git error: {e}")
@@ -735,8 +737,13 @@ def _set_remote_default_branch(
         logger.debug(f"Set local HEAD to refs/heads/{branch}")
 
 
-def _result(name: str, start: float, status: str, error: str) -> Dict[str, Any]:
-    return {"name": name, "status": status, "duration": time.time() - start, "error": error}
+def _result(
+    name: str, start: float, status: str, error: str, extra: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    result = {"name": name, "status": status, "duration": time.time() - start, "error": error}
+    if extra:
+        result.update(extra)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -952,7 +959,10 @@ def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
     finally:
         _restore_sigint_handler(original)
         shutil.rmtree(work_root, ignore_errors=True)
-    return _summarize(results, logger, args, cfg)
+    _sync_mode = "push"
+    rc = _summarize(results, logger, args, cfg)
+    _maybe_notify(cfg, _sync_mode, results)
+    return rc
 
 
 def run_pull(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logger) -> int:
@@ -1057,7 +1067,21 @@ def run_pull(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
     finally:
         _restore_sigint_handler(original)
         shutil.rmtree(work_root, ignore_errors=True)
-    return _summarize(results, logger, args, cfg)
+    _sync_mode = "pull"
+    rc = _summarize(results, logger, args, cfg)
+    _maybe_notify(cfg, _sync_mode, results)
+    return rc
+
+
+def _maybe_notify(cfg: Dict[str, Any], mode: str, results: List[Dict[str, Any]]) -> None:
+    """Send sync notifications if configured. Never breaks the sync itself."""
+    nsettings = cfg.get("notify_settings") if isinstance(cfg, dict) else None
+    if not nsettings:
+        return
+    try:
+        notify.sync_finished(nsettings, mode, results)
+    except Exception as e:
+        logging.getLogger("encmirror").warning("Notification failed: %s", e)
 
 
 def _log_result(logger: logging.Logger, idx: int, total: int, res: Dict[str, Any]) -> None:
@@ -1150,6 +1174,7 @@ def main() -> None:
         sys.exit(1)
 
     cfg = _load_config(logger)
+    cfg["notify_settings"] = notify.settings_from_env()
     if args.keys_file:
         try:
             cfg["repo_keys"] = load_keys_file(args.keys_file)

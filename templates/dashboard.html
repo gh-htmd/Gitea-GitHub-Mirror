@@ -58,7 +58,36 @@
     </form>
     <span class="muted">Schedule: {% if auto_sync %}every {{ interval }}h, {{ direction }}{% else %}disabled{% endif %}
       — <a href="{{ url_for('config') }}">change in Config</a></span>
+    <span class="muted">Notifications:
+      {% if notify_channels %}{% for c in notify_channels %}<span class="pill ok">{{ c }}</span>{% endfor %}{% else %}<span class="pill mut">off</span>{% endif %}
+      — <a href="{{ url_for('config') }}">configure</a></span>
   </div>
+</div>
+
+<div class="panel">
+  <h2>Encrypted storage <span class="muted" style="font-weight:400;">— {{ storage_total }} total</span></h2>
+  {% if storage_chart %}
+    {{ storage_chart|safe }}
+  {% endif %}
+  {% if storage_rows %}
+  <table style="margin-top:12px;">
+    <tr><th>Repo</th><th>Size</th><th style="width:40%;">Share</th><th>Measured</th></tr>
+    {% for r in storage_rows %}
+    <tr>
+      <td><code>{{ r["repo"] }}</code></td>
+      <td>{{ r["human"] }}</td>
+      <td>
+        <div style="background:#eef0f3; border-radius:6px; height:10px;">
+          <div style="background:#2563eb; height:10px; border-radius:6px; width:{{ r['pct'] }}%;"></div>
+        </div>
+      </td>
+      <td class="muted">{{ r["recorded_at"] }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No measurements yet — sizes are recorded after each successful encrypted push.</p>
+  {% endif %}
 </div>
 
 <div class="panel">

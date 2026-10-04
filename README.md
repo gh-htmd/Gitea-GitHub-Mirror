@@ -58,8 +58,10 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
 | **Encrypted Mirroring** | `encrypted_mirror.py`: Gitea → GitHub pushes AES-256-GCM encrypted bundles (unreadable on GitHub); GitHub → Gitea decrypts and restores; per-repo keys or one shared key |
 | **Web UI** | `webui.py`: password-gated dashboard (Docker) — sync stats, per-repo key management, env-based config, one-click push/pull, history, built-in scheduler |
+| **Notifications** | Telegram / ntfy / email alerts on sync failures (or every run); test button in the UI; works from the CLI too |
+| **Storage Stats** | Encrypted bundle sizes recorded per push; dashboard shows totals, per-repo breakdown and growth chart |
 
-> **💡 v2.6.0 Highlights:** 🖥️ New password-gated **web UI** (Docker) with stats, per-repo keys and scheduler, plus 🔐 **encrypted bidirectional mirroring** — push Gitea repos to GitHub fully encrypted, pull them back decrypted into Gitea.
+> **💡 v2.7.0 Highlights:** 🔔 **Notifications** (Telegram/ntfy/email) on sync failures, and 📦 **storage stats** — per-repo encrypted bundle sizes with a growth chart on the dashboard.
 
 ---
 
@@ -348,6 +350,14 @@ The `./data` volume persists the UI-managed `.env`, the per-repo key store, and 
 
 Per-repo keys also work from the CLI: `--keys-file keys.json` (or `KEYS_FILE` env) with `{"myrepo": "its-passphrase"}` — repos without an entry fall back to `ENCRYPTION_PASSPHRASE`.
 
+### Notifications
+
+Get told when a sync fails — via **Telegram** (bot token + chat ID), **ntfy** (topic, self-hosted server supported), or **email** (SMTP). Configure on the Config page or via `NOTIFY_*` env vars (see `.env.example`); there's a "Send test notification" button to verify each channel. `NOTIFY_MODE` controls when messages go out: `failures` (default), `always`, or `never`. The CLI sends them too — no UI required.
+
+### Storage stats
+
+Every successful encrypted push records its bundle size. The dashboard shows total encrypted storage, a per-repo breakdown with share bars, and a growth-over-time chart — useful for spotting runaway repos before GitHub quotas become a problem.
+
 ---
 
 ## Project Structure
@@ -481,7 +491,7 @@ After each run, a Markdown report is generated in the `reports/` directory:
 # 📊 Execution Report
 
 **Date:** 2026-05-27 14:30:00
-**Version:** v2.6.0
+**Version:** v2.7.0
 **Mode:** Concurrent (strict synchronous per worker)
 
 ## Summary

@@ -50,7 +50,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import (
     Flask,
     flash,
-    g,
     redirect,
     render_template,
     request,
@@ -59,6 +58,7 @@ from flask import (
 )
 
 import encrypted_mirror as em
+import notify
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("WEBUI_DATA_DIR", str(APP_DIR / "data")))
@@ -81,6 +81,31 @@ CONFIG_FIELDS: List[Tuple[str, str, str, bool]] = [
     ("AUTO_SYNC", "Enable scheduled sync", "bool", False),
     ("SYNC_DIRECTION", "Scheduled sync direction", "select", False),
 ]
+
+# Notification settings (rendered as their own section on the Config page)
+NOTIFY_FIELDS: List[Tuple[str, str, str, bool]] = [
+    ("NOTIFY_MODE", "Notify me", "notify_mode", False),
+    ("NOTIFY_TELEGRAM_BOT_TOKEN", "Telegram bot token", "password", False),
+    ("NOTIFY_TELEGRAM_CHAT_ID", "Telegram chat ID", "text", False),
+    ("NOTIFY_NTFY_TOPIC", "ntfy topic", "text", False),
+    ("NOTIFY_NTFY_SERVER", "ntfy server", "text", False),
+    ("NOTIFY_SMTP_HOST", "SMTP host", "text", False),
+    ("NOTIFY_SMTP_PORT", "SMTP port", "int", False),
+    ("NOTIFY_SMTP_USER", "SMTP username", "text", False),
+    ("NOTIFY_SMTP_PASS", "SMTP password", "password", False),
+    ("NOTIFY_SMTP_FROM", "Email from address", "text", False),
+    ("NOTIFY_EMAIL_TO", "Email recipients (comma-separated)", "text", False),
+]
+
+NOTIFY_FIELD_HINTS = {
+    "ENCRYPTION_PASSPHRASE": "The shared key used for repos without a custom per-repo key (see Repositories).",
+    "SYNC_DIRECTION": "Which direction the scheduled sync runs.",
+    "NOTIFY_MODE": "When to send notifications: on failures only, after every run, or never.",
+    "NOTIFY_TELEGRAM_BOT_TOKEN": "Create a bot with @BotFather; paste its token here.",
+    "NOTIFY_TELEGRAM_CHAT_ID": "Your chat ID (ask @userinfobot) or a group/channel ID.",
+    "NOTIFY_NTFY_TOPIC": "Any topic name, e.g. mirror-alerts-xyz. Subscribe in the ntfy app.",
+    "NOTIFY_NTFY_SERVER": "Defaults to https://ntfy.sh; use your own server if self-hosted.",
+}
 
 log = logging.getLogger("webui")
 
@@ -177,120 +202,252 @@ def cfg_problems(cfg: Dict[str, Any]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Database: per-repo keys + sync history
+# Database: per-repo keys + sync history + bundle sizes.
+# Thread-safe: syncs run in background threads (no Flask `g` there), so every
+# operation opens its own short-lived connection, serialized by a lock.
 # ---------------------------------------------------------------------------
-def _db() -> sqlite3.Connection:
-    if "db" not in g:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS repo_keys("
-            "repo TEXT PRIMARY KEY, passphrase TEXT NOT NULL, updated_at TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sync_runs("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, direction TEXT NOT NULL, "
-            "status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, "
-            "duration_s REAL, detail TEXT)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_runs_repo ON sync_runs(repo, direction, started_at)"
-        )
-        conn.commit()
-        g.db = conn
-    return g.db
+_db_lock = threading.Lock()
+
+
+def _db_conn() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS repo_keys("
+        "repo TEXT PRIMARY KEY, passphrase TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sync_runs("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, direction TEXT NOT NULL, "
+        "status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, "
+        "duration_s REAL, detail TEXT)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_repo ON sync_runs(repo, direction, started_at)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS bundle_sizes("
+        "repo TEXT NOT NULL, recorded_at TEXT NOT NULL, bytes INTEGER NOT NULL)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sizes_repo ON bundle_sizes(repo, recorded_at)")
+    conn.commit()
+    return conn
 
 
 def get_all_repo_keys() -> Dict[str, str]:
     try:
-        rows = _db().execute("SELECT repo, passphrase FROM repo_keys").fetchall()
+        with _db_lock:
+            conn = _db_conn()
+            try:
+                rows = conn.execute("SELECT repo, passphrase FROM repo_keys").fetchall()
+            finally:
+                conn.close()
         return {r["repo"]: r["passphrase"] for r in rows}
     except Exception:
         return {}
 
 
 def set_repo_key(repo: str, passphrase: str) -> None:
-    _db().execute(
-        "INSERT OR REPLACE INTO repo_keys(repo, passphrase, updated_at) VALUES (?,?,?)",
-        (repo, passphrase, _utcnow()),
-    )
-    _db().commit()
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO repo_keys(repo, passphrase, updated_at) VALUES (?,?,?)",
+                (repo, passphrase, _utcnow()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def clear_repo_key(repo: str) -> None:
-    _db().execute("DELETE FROM repo_keys WHERE repo = ?", (repo,))
-    _db().commit()
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("DELETE FROM repo_keys WHERE repo = ?", (repo,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def record_runs(direction: str, started_at: str, results: List[Dict[str, Any]]) -> None:
     finished = _utcnow()
-    db = _db()
-    for r in results:
-        db.execute(
-            "INSERT INTO sync_runs(repo, direction, status, started_at, finished_at,"
-            " duration_s, detail) VALUES (?,?,?,?,?,?,?)",
-            (
-                r.get("name", "?"),
-                direction,
-                r.get("status", "failed"),
-                started_at,
-                finished,
-                float(r.get("duration", 0) or 0),
-                str(r.get("error", ""))[:500],
-            ),
-        )
-    db.commit()
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            for r in results:
+                conn.execute(
+                    "INSERT INTO sync_runs(repo, direction, status, started_at, finished_at,"
+                    " duration_s, detail) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        r.get("name", "?"),
+                        direction,
+                        r.get("status", "failed"),
+                        started_at,
+                        finished,
+                        float(r.get("duration", 0) or 0),
+                        str(r.get("error", ""))[:500],
+                    ),
+                )
+                # Track encrypted bundle sizes for the storage stats (push only).
+                size = r.get("bytes")
+                if direction == "push" and r.get("status") == "success" and isinstance(size, int):
+                    conn.execute(
+                        "INSERT INTO bundle_sizes(repo, recorded_at, bytes) VALUES (?,?,?)",
+                        (r.get("name", "?"), finished, size),
+                    )
+            # Prune: keep the last 200 measurements per repo.
+            conn.execute(
+                "DELETE FROM bundle_sizes WHERE rowid IN ("
+                "SELECT rowid FROM ("
+                "SELECT rowid, ROW_NUMBER() OVER (PARTITION BY repo ORDER BY recorded_at DESC)"
+                " AS rn FROM bundle_sizes) WHERE rn > 200)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def last_run_per_repo() -> Dict[Tuple[str, str], sqlite3.Row]:
-    rows = (
-        _db()
-        .execute(
-            "SELECT repo, direction, status, started_at, detail FROM sync_runs "
-            "WHERE id IN (SELECT MAX(id) FROM sync_runs GROUP BY repo, direction)"
-        )
-        .fetchall()
-    )
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            rows = conn.execute(
+                "SELECT repo, direction, status, started_at, detail FROM sync_runs "
+                "WHERE id IN (SELECT MAX(id) FROM sync_runs GROUP BY repo, direction)"
+            ).fetchall()
+        finally:
+            conn.close()
     return {(r["repo"], r["direction"]): r for r in rows}
 
 
 def recent_runs(limit: int = 20) -> List[sqlite3.Row]:
-    return (
-        _db()
-        .execute(
-            "SELECT repo, direction, status, started_at, duration_s, detail FROM sync_runs "
-            "ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-        .fetchall()
-    )
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            rows = conn.execute(
+                "SELECT repo, direction, status, started_at, duration_s, detail FROM sync_runs "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        finally:
+            conn.close()
+    return rows
 
 
 def runs_last_24h() -> Dict[str, int]:
     cutoff = datetime.now(timezone.utc).timestamp() - 86400
-    rows = (
-        _db()
-        .execute(
-            "SELECT status, COUNT(*) AS n FROM sync_runs "
-            "WHERE strftime('%s', started_at) > ? GROUP BY status",
-            (cutoff,),
-        )
-        .fetchall()
-    )
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM sync_runs "
+                "WHERE strftime('%s', started_at) > ? GROUP BY status",
+                (cutoff,),
+            ).fetchall()
+        finally:
+            conn.close()
     return {r["status"]: r["n"] for r in rows}
 
 
 def last_sync_overall() -> Optional[sqlite3.Row]:
-    return (
-        _db()
-        .execute("SELECT direction, status, finished_at FROM sync_runs ORDER BY id DESC LIMIT 1")
-        .fetchone()
-    )
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            row = conn.execute(
+                "SELECT direction, status, finished_at FROM sync_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+    return row
+
+
+def storage_latest() -> List[sqlite3.Row]:
+    """Latest encrypted bundle size per repo (for the storage panel)."""
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            rows = conn.execute(
+                "SELECT repo, bytes, recorded_at FROM bundle_sizes "
+                "WHERE rowid IN (SELECT MAX(rowid) FROM bundle_sizes GROUP BY repo) "
+                "ORDER BY bytes DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+    return rows
+
+
+def storage_daily_totals(days: int = 90) -> List[Tuple[str, int]]:
+    """Total encrypted bytes per day (latest measurement per repo per day)."""
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            rows = conn.execute(
+                "SELECT date(recorded_at) AS d, SUM(bytes) AS total FROM bundle_sizes "
+                "WHERE rowid IN ("
+                "  SELECT MAX(rowid) FROM bundle_sizes GROUP BY repo, date(recorded_at)) "
+                "AND recorded_at > datetime('now', ?) "
+                "GROUP BY d ORDER BY d",
+                (f"-{days} days",),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [(r["d"], r["total"]) for r in rows]
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def human_bytes(n: int) -> str:
+    """Format a byte count for display (B/KB/MB/GB/TB)."""
+    value = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def sparkline_svg(points: List[Tuple[str, int]], width: int = 560, height: int = 110) -> str:
+    """Inline SVG area chart of (label, value) points. Dependency-free."""
+    if not points:
+        return ""
+    values = [v for _, v in points]
+    lo, hi = min(values), max(values)
+    span = (hi - lo) or 1
+    pad = 8
+    n = len(points)
+    step_x = (width - 2 * pad) / max(n - 1, 1)
+
+    def xy(i: int, v: int) -> Tuple[float, float]:
+        x = pad + i * step_x
+        y = pad + (height - 2 * pad) * (1 - (v - lo) / span)
+        return x, y
+
+    pts = " ".join(f"{x:.1f},{y:.1f}" for i, (_, v) in enumerate(points) for x, y in [xy(i, v)])
+    last_x, last_y = xy(n - 1, values[-1])
+    first_x, _ = xy(0, values[0])
+    area = f"{pts} {last_x:.1f},{height - pad} {first_x:.1f},{height - pad}"
+    first_label, last_label = points[0][0], points[-1][0]
+    return (
+        f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}" '
+        f'role="img" aria-label="storage over time">'
+        f'<polygon points="{area}" fill="#dbeafe"/>'
+        f'<polyline points="{pts}" fill="none" stroke="#2563eb" stroke-width="2"/>'
+        f'<text x="{pad}" y="{height - 1}" font-size="10" fill="#6b7484">{first_label}</text>'
+        f'<text x="{width - pad}" y="{height - 1}" font-size="10" fill="#6b7484" '
+        f'text-anchor="end">{last_label}</text>'
+        f'<text x="{width - pad}" y="{pad + 6}" font-size="10" fill="#1c2330" text-anchor="end">'
+        f"{human_bytes(hi)}</text>"
+        "</svg>"
+    )
+
+
+def notify_settings() -> Dict[str, str]:
+    """Notification settings from the effective config (env first, then UI .env)."""
+    return {k: effective_value(k) for k in notify.SETTING_KEYS}
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +487,7 @@ def run_sync(mode: str, only: Optional[List[str]] = None) -> Tuple[bool, str]:
             )
             return False, "Config incomplete: " + "; ".join(problems)
         cfg["result_sink"] = lambda results: record_runs(mode, started_at, results)
+        cfg["notify_settings"] = notify_settings()
         args = SimpleNamespace(
             only=only, workers=None, dry_run=False, yes=True, no_verify=False, all_gitea=False
         )
@@ -383,12 +541,6 @@ def create_app() -> Flask:
     app = Flask(__name__, template_folder=str(APP_DIR / "templates"))
     app.secret_key = hashlib.sha256(f"ggm-webui:{ui_password}".encode()).hexdigest()
     app.config["UI_PASSWORD"] = ui_password
-
-    @app.teardown_appcontext
-    def _close_db(exc):
-        db = g.pop("db", None)
-        if db is not None:
-            db.close()
 
     def login_required(view):
         from functools import wraps
@@ -499,6 +651,9 @@ def create_app() -> Flask:
                 stats["github_encrypted"] = count_github_encrypted()
             except Exception as e:
                 stats["error"] = f"Could not reach GitHub: {e}"
+        sizes = storage_latest()
+        total_bytes = sum(r["bytes"] for r in sizes)
+        history = storage_daily_totals(90)
         return render_template(
             "dashboard.html",
             stats=stats,
@@ -509,6 +664,19 @@ def create_app() -> Flask:
             interval=effective_value("SYNC_INTERVAL_HOURS") or "12",
             direction=effective_value("SYNC_DIRECTION") or "push",
             running={"push": is_running("push"), "pull": is_running("pull")},
+            storage_total=human_bytes(total_bytes),
+            storage_rows=[
+                {
+                    "repo": r["repo"],
+                    "bytes": r["bytes"],
+                    "human": human_bytes(r["bytes"]),
+                    "pct": round(100 * r["bytes"] / total_bytes) if total_bytes else 0,
+                    "recorded_at": r["recorded_at"],
+                }
+                for r in sizes
+            ],
+            storage_chart=sparkline_svg(history),
+            notify_channels=notify.configured_channels(notify_settings()),
         )
 
     @app.get("/repos")
@@ -592,24 +760,33 @@ def create_app() -> Flask:
     @app.get("/config")
     @login_required
     def config():
-        fields = []
-        for key, label, ftype, required in CONFIG_FIELDS:
-            fields.append(
-                {
-                    "key": key,
-                    "label": label,
-                    "type": ftype,
-                    "required": required,
-                    "value": "" if ftype == "password" else effective_value(key),
-                    "is_set": bool(effective_value(key)) if ftype == "password" else None,
-                    "source": value_source(key),
-                    "readonly": value_source(key) == "environment",
-                }
-            )
+        def _field(key, label, ftype, required):
+            options = None
+            if ftype == "select":
+                options = ["push", "pull", "both"]
+            elif ftype == "notify_mode":
+                options = ["failures", "always", "never"]
+            return {
+                "key": key,
+                "label": label,
+                "type": ftype,
+                "required": required,
+                "options": options,
+                "value": "" if ftype == "password" else effective_value(key),
+                "is_set": bool(effective_value(key)) if ftype == "password" else None,
+                "source": value_source(key),
+                "readonly": value_source(key) == "environment",
+                "hint": NOTIFY_FIELD_HINTS.get(key, ""),
+            }
+
+        fields = [_field(*f) for f in CONFIG_FIELDS]
+        notify_fields = [_field(*f) for f in NOTIFY_FIELDS]
         ui_pw_source = value_source("UI_PASSWORD")
         return render_template(
             "config.html",
             fields=fields,
+            notify_fields=notify_fields,
+            notify_channels=notify.configured_channels(notify_settings()),
             ui_pw_source=ui_pw_source,
             ui_pw_readonly=ui_pw_source == "environment",
         )
@@ -621,7 +798,7 @@ def create_app() -> Flask:
             flash("Invalid form token. Please try again.", "error")
             return redirect(url_for("config"))
         updates: Dict[str, str] = {}
-        for key, _label, ftype, _required in CONFIG_FIELDS:
+        for key, _label, ftype, _required in CONFIG_FIELDS + NOTIFY_FIELDS:
             if value_source(key) == "environment":
                 continue  # read-only: managed by the environment
             raw = request.form.get(key, "")
@@ -640,6 +817,25 @@ def create_app() -> Flask:
             session.clear()
             return redirect(url_for("login"))
         flash("Configuration saved.", "ok")
+        return redirect(url_for("config"))
+
+    @app.post("/config/test-notify")
+    @login_required
+    def test_notify():
+        if not check_csrf():
+            flash("Invalid form token. Please try again.", "error")
+            return redirect(url_for("config"))
+        settings = notify_settings()
+        channels = notify.configured_channels(settings)
+        if not channels:
+            flash("No notification channels configured yet.", "error")
+            return redirect(url_for("config"))
+        outcomes = notify.test_message(settings)
+        for o in outcomes:
+            if o["ok"]:
+                flash(f"Test notification sent via {o['channel']}.", "ok")
+            else:
+                flash(f"{o['channel']} failed: {o['error']}", "error")
         return redirect(url_for("config"))
 
     return app

@@ -222,3 +222,128 @@ def test_csrf_rejected(client):
     rv = client.post("/config", data={"GITEA_URL": "https://x.example.com", "csrf_token": "bogus"})
     assert rv.status_code == 302  # redirected back with an error flash
     assert effective_value("GITEA_URL") != "https://x.example.com"
+
+
+def test_human_bytes():
+    assert webui.human_bytes(500) == "500 B"
+    assert webui.human_bytes(2048) == "2.0 KB"
+    assert webui.human_bytes(5 * 1024 * 1024) == "5.0 MB"
+    assert webui.human_bytes(3 * 1024**3) == "3.0 GB"
+
+
+def test_sparkline():
+    assert webui.sparkline_svg([]) == ""
+    svg = webui.sparkline_svg([("2026-10-01", 100), ("2026-10-02", 300), ("2026-10-03", 200)])
+    assert "<svg" in svg and "2026-10-01" in svg and "polyline" in svg
+
+
+def test_storage_recording_and_queries(client):
+    _login(client)
+    with app.app_context():
+        webui.record_runs(
+            "push",
+            "2026-10-04 10:00:00",
+            [
+                {
+                    "name": "size-a",
+                    "status": "success",
+                    "duration": 1.0,
+                    "error": "",
+                    "bytes": 1000,
+                },
+                {
+                    "name": "size-b",
+                    "status": "success",
+                    "duration": 2.0,
+                    "error": "",
+                    "bytes": 3000,
+                },
+                {"name": "size-c", "status": "failed", "duration": 0.5, "error": "x"},
+            ],
+        )
+        latest = {r["repo"]: r["bytes"] for r in webui.storage_latest()}
+        assert latest["size-a"] == 1000
+        assert latest["size-b"] == 3000
+        assert "size-c" not in latest  # failed runs record no size
+        # newer measurement supersedes
+        webui.record_runs(
+            "push",
+            "2026-10-04 11:00:00",
+            [
+                {
+                    "name": "size-a",
+                    "status": "success",
+                    "duration": 1.0,
+                    "error": "",
+                    "bytes": 1500,
+                },
+            ],
+        )
+        latest = {r["repo"]: r["bytes"] for r in webui.storage_latest()}
+        assert latest["size-a"] == 1500
+        totals = webui.storage_daily_totals(90)
+        assert totals, "expected daily totals"
+        assert totals[-1][1] == 4500  # latest per repo: 1500 + 3000
+
+
+def test_dashboard_shows_storage_panel(client):
+    _login(client)
+    with app.app_context():
+        webui.record_runs(
+            "push",
+            "2026-10-04 12:00:00",
+            [
+                {
+                    "name": "size-a",
+                    "status": "success",
+                    "duration": 1.0,
+                    "error": "",
+                    "bytes": 1500,
+                },
+            ],
+        )
+    rv = client.get("/")
+    assert rv.status_code == 200
+    assert b"Encrypted storage" in rv.data
+    assert b"size-a" in rv.data
+
+
+def test_notify_fields_render(client):
+    _login(client)
+    rv = client.get("/config")
+    assert b"NOTIFY_TELEGRAM_BOT_TOKEN" in rv.data
+    assert b"NOTIFY_NTFY_TOPIC" in rv.data
+    assert b"test-notify" in rv.data
+
+
+def test_notify_config_saved_and_detected(client):
+    _login(client)
+    _csrf_post(client, "/config", {"NOTIFY_MODE": "always", "NOTIFY_NTFY_TOPIC": "my-topic"})
+    assert webui.effective_value("NOTIFY_MODE") == "always"
+    settings = webui.notify_settings()
+    assert settings["NOTIFY_NTFY_TOPIC"] == "my-topic"
+    assert webui.notify.configured_channels(settings) == ["ntfy"]
+
+
+def test_test_notify_no_channels(client, monkeypatch):
+    _login(client)
+    for key in webui.notify.SETTING_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    with app.app_context():
+        webui.write_ui_config({k: "" for k in webui.notify.SETTING_KEYS})
+    token = _login(client)
+    rv = client.post("/config/test-notify", data={"csrf_token": token}, follow_redirects=True)
+    assert b"No notification channels configured yet." in rv.data
+
+
+def test_test_notify_sends(client, monkeypatch):
+    _login(client)
+    monkeypatch.setattr(
+        webui.notify,
+        "test_message",
+        lambda settings: [{"channel": "ntfy", "ok": True, "error": ""}],
+    )
+    monkeypatch.setattr(webui.notify, "configured_channels", lambda settings: ["ntfy"])
+    token = _login(client)
+    rv = client.post("/config/test-notify", data={"csrf_token": token}, follow_redirects=True)
+    assert b"Test notification sent via ntfy." in rv.data
