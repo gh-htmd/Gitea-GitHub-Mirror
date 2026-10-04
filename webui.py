@@ -107,6 +107,69 @@ NOTIFY_FIELD_HINTS = {
     "NOTIFY_NTFY_SERVER": "Defaults to https://ntfy.sh; use your own server if self-hosted.",
 }
 
+# Extra tunables for the encrypted sync (encrypted_mirror.py)
+TUNING_FIELDS: List[Tuple[str, str, str, bool]] = [
+    ("KEYS_FILE", "Per-repo keys file (JSON path)", "text", False),
+    ("GIT_CLONE_TIMEOUT", "Git clone timeout (seconds)", "int", False),
+    ("LOG_LEVEL", "Log verbosity", "log_level", False),
+]
+
+# Settings for the classic mirror.py CLI (used when running it via docker/command line)
+CLASSIC_FIELDS: List[Tuple[str, str, str, bool]] = [
+    ("PRESERVE_ORGS", "Strict organization replication", "bool", False),
+    ("SYNC_NOW", "Sync now (existing mirrors)", "bool", False),
+    ("FORCE_RECREATE", "Delete and recreate all mirrors", "bool", False),
+    ("MIRROR_INTERVAL", "Mirror sync interval", "text", False),
+    ("MIRROR_LFS", "Enable Git LFS on migrated mirrors", "bool", False),
+    ("MIRROR_EXTRAS", "Migrate wiki/issues/PRs/labels", "bool", False),
+    ("LANG_MIRROR", "CLI language", "lang", False),
+    ("MAX_RETRIES", "Max retries per repo", "int", False),
+    ("RETRY_DELAY", "Initial retry delay (seconds)", "int", False),
+    ("REQUEST_TIMEOUT", "HTTP timeout per request (seconds)", "int", False),
+    ("REPORT_MAX_COUNT", "Archived reports to keep", "int", False),
+    ("NOTIFY_WEBHOOK", "Webhook URL (classic mirror)", "text", False),
+    ("NOTIFY_TYPE", "Webhook type", "notify_type", False),
+    ("NOTIFY_CHAT_ID", "Telegram chat ID (classic mirror)", "text", False),
+    ("NOTIFY_ONLY_ON_FAILURE", "Classic webhook: only on failure", "bool", False),
+    ("NOTIFY_INCLUDE_REPORT", "Classic webhook: include report", "bool", False),
+]
+
+# (section title, fields, description) rendered in this order on the Config page
+CONFIG_GROUPS: List[Tuple[str, list, str]] = [
+    ("Mirror", CONFIG_FIELDS, "Connection, encryption and scheduling for the encrypted sync."),
+    ("Encrypted sync", TUNING_FIELDS, "Fine-tuning for the encrypted push/pull engine."),
+    (
+        "Classic mirror",
+        CLASSIC_FIELDS,
+        "Applies when running the classic mirror.py directly (docker service or "
+        "command line). The web UI itself runs the encrypted sync above.",
+    ),
+    ("Notifications", NOTIFY_FIELDS, "Alerts for finished sync runs (Telegram, ntfy, email)."),
+]
+
+FIELD_HINTS = {
+    **NOTIFY_FIELD_HINTS,
+    "KEYS_FILE": "JSON file mapping repo names to passphrases. The UI's per-repo keys "
+    "take precedence; this is an extra fallback, mainly for CLI runs.",
+    "GIT_CLONE_TIMEOUT": "How long a single git clone may take before it is aborted.",
+    "LOG_LEVEL": "Applies to the sync engine logs.",
+    "PRESERVE_ORGS": "Replicate the GitHub organization structure strictly on Gitea.",
+    "SYNC_NOW": "Trigger an immediate sync of already-mirrored repos on the next run.",
+    "FORCE_RECREATE": "DANGER: deletes every mirrored repo on Gitea and migrates from scratch.",
+    "MIRROR_INTERVAL": "How often Gitea pull-mirrors sync, e.g. 8h0m0s.",
+    "MIRROR_LFS": "Enable Git LFS when creating the Gitea mirrors.",
+    "MIRROR_EXTRAS": "Also migrate wiki, issues, pull requests and labels.",
+    "MAX_RETRIES": "How many times a failed repo is retried.",
+    "RETRY_DELAY": "Wait between retries (exponential backoff).",
+    "REQUEST_TIMEOUT": "Per-request HTTP timeout for API calls.",
+    "REPORT_MAX_COUNT": "Old run reports are pruned beyond this count.",
+    "NOTIFY_WEBHOOK": "Where the classic mirror posts its webhook (see NOTIFY_TYPE).",
+    "NOTIFY_TYPE": "Which chat system's format the webhook uses.",
+    "NOTIFY_CHAT_ID": "Needed only for the Telegram webhook type.",
+}
+
+ALL_FIELD_KEYS = [f[0] for _, fields, _ in CONFIG_GROUPS for f in fields]
+
 log = logging.getLogger("webui")
 
 
@@ -143,11 +206,42 @@ def effective_value(key: str) -> str:
 
 def value_source(key: str) -> str:
     """Where the effective value comes from: environment | ui | unset."""
-    if key in os.environ:
+    if key in os.environ and key not in _exported:
         return "environment"
     if key in _dotenv_values():
         return "ui"
     return "unset"
+
+
+_exported: Dict[str, str] = {}  # key -> value this process placed into os.environ
+
+
+def export_ui_env() -> None:
+    """Publish UI-saved values into os.environ for code that reads it directly.
+
+    encrypted_mirror.py and notify.py read several settings straight from
+    os.environ (LOG_LEVEL, KEYS_FILE, GIT_CLONE_TIMEOUT, ...). Genuine process
+    environment variables always win; empty UI values clear a previous export.
+    Called at startup and after every config save.
+    """
+    merged = _dotenv_values()
+    for key in ALL_FIELD_KEYS:
+        current = os.environ.get(key)
+        if key in _exported:
+            if current != _exported[key]:
+                # A genuine environment value appeared under our export:
+                # adopt it and stop managing this key.
+                del _exported[key]
+                continue
+        elif current:
+            continue  # genuine pre-existing environment value: leave untouched
+        value = merged.get(key, "")
+        if value:
+            os.environ[key] = value
+            _exported[key] = value
+        else:
+            os.environ.pop(key, None)
+            _exported.pop(key, None)
 
 
 def write_ui_config(updates: Dict[str, str]) -> None:
@@ -155,8 +249,8 @@ def write_ui_config(updates: Dict[str, str]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     current = _read_dotenv(DOTENV_UI)
     for key, value in updates.items():
-        if key in os.environ:
-            continue  # environment-managed: read-only in the UI
+        if key in os.environ and key not in _exported:
+            continue  # genuine environment value: read-only in the UI
         if value:
             current[key] = value
         else:
@@ -171,6 +265,14 @@ def _as_bool(value: str) -> bool:
 
 def build_cfg() -> Dict[str, Any]:
     """Assemble an encrypted_mirror cfg dict from effective config + DB repo keys."""
+    repo_keys = get_all_repo_keys()
+    keys_file = effective_value("KEYS_FILE")
+    if keys_file:
+        try:
+            file_keys = em.load_keys_file(keys_file)
+            repo_keys = {**file_keys, **repo_keys}  # UI keys take precedence
+        except Exception as e:
+            log.warning("Could not load KEYS_FILE %s: %s", keys_file, e)
     return {
         "gitea_url": effective_value("GITEA_URL").rstrip("/"),
         "gitea_token": effective_value("GITEA_TOKEN"),
@@ -181,7 +283,7 @@ def build_cfg() -> Dict[str, Any]:
         "github_private": _as_bool(effective_value("GITHUB_MIRROR_PRIVATE") or "true"),
         "max_workers": int(effective_value("MAX_WORKERS") or "5"),
         "skip_repos": {r.strip() for r in effective_value("SKIP_REPOS").split(",") if r.strip()},
-        "repo_keys": get_all_repo_keys(),
+        "repo_keys": repo_keys,
     }
 
 
@@ -531,6 +633,7 @@ def _ui_password() -> str:
 
 
 def create_app() -> Flask:
+    export_ui_env()  # UI-saved values become visible to os.environ readers
     ui_password = _ui_password()
     if not ui_password:
         raise RuntimeError(
@@ -766,6 +869,12 @@ def create_app() -> Flask:
                 options = ["push", "pull", "both"]
             elif ftype == "notify_mode":
                 options = ["failures", "always", "never"]
+            elif ftype == "log_level":
+                options = ["DEBUG", "INFO", "WARNING", "ERROR"]
+            elif ftype == "lang":
+                options = ["en", "cn"]
+            elif ftype == "notify_type":
+                options = ["slack", "discord", "teams", "feishu", "dingtalk", "telegram", "generic"]
             return {
                 "key": key,
                 "label": label,
@@ -776,16 +885,22 @@ def create_app() -> Flask:
                 "is_set": bool(effective_value(key)) if ftype == "password" else None,
                 "source": value_source(key),
                 "readonly": value_source(key) == "environment",
-                "hint": NOTIFY_FIELD_HINTS.get(key, ""),
+                "hint": FIELD_HINTS.get(key, ""),
             }
 
-        fields = [_field(*f) for f in CONFIG_FIELDS]
-        notify_fields = [_field(*f) for f in NOTIFY_FIELDS]
+        groups = []
+        for title, fields, description in CONFIG_GROUPS:
+            groups.append(
+                {
+                    "title": title,
+                    "description": description,
+                    "fields": [_field(*f) for f in fields],
+                }
+            )
         ui_pw_source = value_source("UI_PASSWORD")
         return render_template(
             "config.html",
-            fields=fields,
-            notify_fields=notify_fields,
+            groups=groups,
             notify_channels=notify.configured_channels(notify_settings()),
             ui_pw_source=ui_pw_source,
             ui_pw_readonly=ui_pw_source == "environment",
@@ -798,21 +913,23 @@ def create_app() -> Flask:
             flash("Invalid form token. Please try again.", "error")
             return redirect(url_for("config"))
         updates: Dict[str, str] = {}
-        for key, _label, ftype, _required in CONFIG_FIELDS + NOTIFY_FIELDS:
-            if value_source(key) == "environment":
-                continue  # read-only: managed by the environment
-            raw = request.form.get(key, "")
-            if ftype == "bool":
-                updates[key] = "true" if raw == "on" else "false"
-            elif ftype == "password":
-                if raw:  # empty password field = leave unchanged
-                    updates[key] = raw
-            else:
-                updates[key] = raw.strip()
+        for _title, fields, _desc in CONFIG_GROUPS:
+            for key, _label, ftype, _required in fields:
+                if value_source(key) == "environment":
+                    continue  # read-only: managed by the environment
+                raw = request.form.get(key, "")
+                if ftype == "bool":
+                    updates[key] = "true" if raw == "on" else "false"
+                elif ftype == "password":
+                    if raw:  # empty password field = leave unchanged
+                        updates[key] = raw
+                else:
+                    updates[key] = raw.strip()
         new_ui_pw = request.form.get("UI_PASSWORD", "")
         if new_ui_pw and value_source("UI_PASSWORD") != "environment":
             updates["UI_PASSWORD"] = new_ui_pw
         write_ui_config(updates)
+        export_ui_env()  # make the new values visible to os.environ readers
         if new_ui_pw and value_source("UI_PASSWORD") != "environment":
             session.clear()
             return redirect(url_for("login"))

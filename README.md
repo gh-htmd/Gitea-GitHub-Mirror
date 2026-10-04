@@ -335,7 +335,7 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 
 - **Dashboard** — simple stats: Gitea repo count, encrypted mirrors on GitHub, last sync (direction/status/time), 24h results, and recent runs.
 - **Repositories** — per-repo encryption keys: give any repo its **own key**, or leave it on the **shared** `ENCRYPTION_PASSPHRASE`. Keys are never displayed back, only "custom key / shared key" badges. Each row shows last push/pull status and has push/pull buttons; "push all / pull all" included.
-- **Config** — every setting (Gitea/GitHub credentials, shared passphrase, workers, schedule) is seeded from environment variables and editable in the UI. Values set via real env vars show as read-only; the rest persist to the data volume's `.env` file.
+- **Config** — every setting is seeded from environment variables and editable in the UI: mirror connection, encrypted-sync tuning (keys file, timeouts, log level), the classic `mirror.py` options, notifications, and scheduling. Values set via real env vars show as read-only; the rest persist to the data volume's `.env` file and take effect immediately (no restart needed).
 - **History** — full log of past sync runs per repo.
 - **Scheduler** — optional built-in auto-sync (`AUTO_SYNC=true`, `SYNC_INTERVAL_HOURS`, `SYNC_DIRECTION=push|pull|both`).
 

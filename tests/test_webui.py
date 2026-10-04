@@ -347,3 +347,99 @@ def test_test_notify_sends(client, monkeypatch):
     token = _login(client)
     rv = client.post("/config/test-notify", data={"csrf_token": token}, follow_redirects=True)
     assert b"Test notification sent via ntfy." in rv.data
+
+
+def test_config_renders_all_sections(client):
+    _login(client)
+    rv = client.get("/config")
+    html = rv.data.decode()
+    for needle in [
+        "KEYS_FILE",
+        "GIT_CLONE_TIMEOUT",
+        "LOG_LEVEL",
+        "PRESERVE_ORGS",
+        "SYNC_NOW",
+        "FORCE_RECREATE",
+        "MIRROR_INTERVAL",
+        "MIRROR_LFS",
+        "MIRROR_EXTRAS",
+        "LANG_MIRROR",
+        "MAX_RETRIES",
+        "RETRY_DELAY",
+        "REQUEST_TIMEOUT",
+        "REPORT_MAX_COUNT",
+        "NOTIFY_WEBHOOK",
+        "NOTIFY_TYPE",
+        "NOTIFY_CHAT_ID",
+        "NOTIFY_ONLY_ON_FAILURE",
+        "NOTIFY_INCLUDE_REPORT",
+        "Encrypted sync",
+        "Classic mirror",
+    ]:
+        assert needle in html, needle
+
+
+def test_config_save_tuning_and_classic(client):
+    _login(client)
+    _csrf_post(
+        client,
+        "/config",
+        {
+            "GIT_CLONE_TIMEOUT": "300",
+            "PRESERVE_ORGS": "on",
+            "LOG_LEVEL": "DEBUG",
+            "NOTIFY_TYPE": "telegram",
+            "LANG_MIRROR": "cn",
+        },
+    )
+    assert webui.effective_value("GIT_CLONE_TIMEOUT") == "300"
+    assert webui.effective_value("PRESERVE_ORGS") == "true"
+    assert webui.effective_value("LOG_LEVEL") == "DEBUG"
+    assert webui.effective_value("NOTIFY_TYPE") == "telegram"
+    assert webui.effective_value("LANG_MIRROR") == "cn"
+    # UI-saved values stay editable (not shown as environment read-only)
+    assert webui.value_source("GIT_CLONE_TIMEOUT") == "ui"
+    # tidy up: LOG_LEVEL in os.environ could affect other tests' logging
+    _csrf_post(
+        client,
+        "/config",
+        {
+            "GIT_CLONE_TIMEOUT": "",
+            "LOG_LEVEL": "",
+            "PRESERVE_ORGS": "",
+            "NOTIFY_TYPE": "",
+            "LANG_MIRROR": "",
+        },
+    )
+
+
+def test_export_ui_env_roundtrip(client, monkeypatch):
+    _login(client)
+    # UI-saved value is exported for os.environ readers...
+    _csrf_post(client, "/config", {"GIT_CLONE_TIMEOUT": "123"})
+    assert os.environ.get("GIT_CLONE_TIMEOUT") == "123"
+    # ...real env wins and is never clobbered...
+    monkeypatch.setenv("GIT_CLONE_TIMEOUT", "999")
+    webui.export_ui_env()
+    assert os.environ["GIT_CLONE_TIMEOUT"] == "999"
+    assert webui.value_source("GIT_CLONE_TIMEOUT") == "environment"
+    # ...and clearing the UI value removes a previous export
+    monkeypatch.delenv("GIT_CLONE_TIMEOUT")
+    _csrf_post(client, "/config", {"GIT_CLONE_TIMEOUT": ""})
+    assert "GIT_CLONE_TIMEOUT" not in os.environ
+    assert webui.effective_value("GIT_CLONE_TIMEOUT") == ""
+
+
+def test_build_cfg_merges_keys_file(client, tmp_path):
+    import json
+
+    _login(client)
+    kf = tmp_path / "keys.json"
+    kf.write_text(json.dumps({"repo-a": "file-key", "repo-b": "file-key-b"}))
+    _csrf_post(client, "/config", {"KEYS_FILE": str(kf)})
+    webui.set_repo_key("repo-a", "db-key")
+    cfg = webui.build_cfg()
+    assert cfg["repo_keys"]["repo-a"] == "db-key"  # UI key wins
+    assert cfg["repo_keys"]["repo-b"] == "file-key-b"  # file key as fallback
+    webui.clear_repo_key("repo-a")
+    _csrf_post(client, "/config", {"KEYS_FILE": ""})

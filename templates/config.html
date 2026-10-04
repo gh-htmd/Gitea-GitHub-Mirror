@@ -1,19 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Config{% endblock %}
-{% block content %}
-<h1>Configuration</h1>
-
-<div class="panel">
-  <p class="muted" style="margin-top:0;">
-    Values come from <strong>environment variables</strong> first (shown read-only —
-    manage those in your Docker/compose setup). Everything else is stored in the
-    data directory's <code>.env</code> file when you save here.
-    Password fields are never displayed back; leave one blank to keep its current value.
-  </p>
-  <form method="post" action="{{ url_for('config_post') }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <h2>Mirror</h2>
-    {% for f in fields %}
+{% macro field(f) %}
     <div class="field">
       <label for="f-{{ f['key'] }}">{{ f["label"] }}
         <span class="src {{ f['source'] }}">{{ f["source"] }}</span>
@@ -26,7 +13,7 @@
                  {% if f["readonly"] %}disabled{% endif %}>
           enabled
         </label>
-      {% elif f["type"] in ["select", "notify_mode"] %}
+      {% elif f["options"] %}
         <select id="f-{{ f['key'] }}" name="{{ f['key'] }}" {% if f["readonly"] %}disabled{% endif %}>
           {% for opt in f["options"] %}
           <option value="{{ opt }}" {% if f["value"] == opt %}selected{% endif %}>{{ opt }}</option>
@@ -41,9 +28,23 @@
       {% endif %}
       {% if f["hint"] %}<div class="hint">{{ f["hint"] }}</div>{% endif %}
     </div>
-    {% endfor %}
+{% endmacro %}
+{% block content %}
+<h1>Configuration</h1>
 
-    <h2 style="margin-top:26px;">Notifications</h2>
+<div class="panel">
+  <p class="muted" style="margin-top:0;">
+    Values come from <strong>environment variables</strong> first (shown read-only —
+    manage those in your Docker/compose setup). Everything else is stored in the
+    data directory's <code>.env</code> file when you save here.
+    Password fields are never displayed back; leave one blank to keep its current value.
+  </p>
+  <form method="post" action="{{ url_for('config_post') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% for g in groups %}
+    <h2{% if not loop.first %} style="margin-top:26px;"{% endif %}>{{ g["title"] }}</h2>
+    {% if g["description"] %}<p class="muted">{{ g["description"] }}</p>{% endif %}
+    {% if g["title"] == "Notifications" %}
     <p class="muted">
       {% if notify_channels %}
         Active channels: {% for c in notify_channels %}<span class="pill ok">{{ c }}</span> {% endfor %}
@@ -51,28 +52,13 @@
         <span class="pill mut">no channels configured</span>
       {% endif %}
     </p>
-    {% for f in notify_fields %}
-    <div class="field">
-      <label for="f-{{ f['key'] }}">{{ f["label"] }}
-        <span class="src {{ f['source'] }}">{{ f["source"] }}</span>
-      </label>
-      {% if f["type"] in ["select", "notify_mode"] %}
-        <select id="f-{{ f['key'] }}" name="{{ f['key'] }}" {% if f["readonly"] %}disabled{% endif %}>
-          {% for opt in f["options"] %}
-          <option value="{{ opt }}" {% if f["value"] == opt %}selected{% endif %}>{{ opt }}</option>
-          {% endfor %}
-        </select>
-      {% else %}
-        <input type="{{ f['type'] if f['type'] in ['text','password'] else 'text' }}"
-               id="f-{{ f['key'] }}" name="{{ f['key'] }}"
-               {% if f["type"] != "password" %}value="{{ f['value'] }}"{% endif %}
-               {% if f["type"] == "password" %}placeholder="{% if f['is_set'] %}•••••••• (set — blank keeps it){% else %}not set{% endif %}" autocomplete="new-password"{% endif %}
-               {% if f["readonly"] %}readonly{% endif %}>
-      {% endif %}
-      {% if f["hint"] %}<div class="hint">{{ f["hint"] }}</div>{% endif %}
-    </div>
+    {% endif %}
+    {% for f in g["fields"] %}
+      {{ field(f) }}
+    {% endfor %}
     {% endfor %}
 
+    <h2 style="margin-top:26px;">Web UI</h2>
     <div class="field">
       <label for="f-UIPW">UI password
         <span class="src {{ ui_pw_source }}">{{ ui_pw_source }}</span>
