@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Config{% endblock %}
+{% block content %}
+<h1>Configuration</h1>
+
+<div class="panel">
+  <p class="muted" style="margin-top:0;">
+    Values come from <strong>environment variables</strong> first (shown read-only —
+    manage those in your Docker/compose setup). Everything else is stored in the
+    data directory's <code>.env</code> file when you save here.
+    Password fields are never displayed back; leave one blank to keep its current value.
+  </p>
+  <form method="post" action="{{ url_for('config_post') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% for f in fields %}
+    <div class="field">
+      <label for="f-{{ f['key'] }}">{{ f["label"] }}
+        <span class="src {{ f['source'] }}">{{ f["source"] }}</span>
+        {% if f["required"] %}<span class="pill err">required</span>{% endif %}
+      </label>
+      {% if f["type"] == "bool" %}
+        <label class="check">
+          <input type="checkbox" id="f-{{ f['key'] }}" name="{{ f['key'] }}"
+                 {% if f["value"] in ["1","true","yes","on"] %}checked{% endif %}
+                 {% if f["readonly"] %}disabled{% endif %}>
+          enabled
+        </label>
+      {% elif f["type"] == "select" %}
+        <select id="f-{{ f['key'] }}" name="{{ f['key'] }}" {% if f["readonly"] %}disabled{% endif %}>
+          {% for opt in ["push", "pull", "both"] %}
+          <option value="{{ opt }}" {% if f["value"] == opt %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+      {% else %}
+        <input type="{{ f['type'] }}" id="f-{{ f['key'] }}" name="{{ f['key'] }}"
+               {% if f["type"] != "password" %}value="{{ f['value'] }}"{% endif %}
+               {% if f["type"] == "password" %}placeholder="{% if f['is_set'] %}•••••••• (set — blank keeps it){% else %}not set{% endif %}" autocomplete="new-password"{% endif %}
+               {% if f["readonly"] %}readonly{% endif %}>
+      {% endif %}
+      {% if f["key"] == "ENCRYPTION_PASSPHRASE" %}
+        <div class="hint">The shared key used for repos without a custom per-repo key (see Repositories).</div>
+      {% elif f["key"] == "SYNC_DIRECTION" %}
+        <div class="hint">Which direction the scheduled sync runs.</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    <div class="field">
+      <label for="f-UIPW">UI password
+        <span class="src {{ ui_pw_source }}">{{ ui_pw_source }}</span>
+      </label>
+      <input type="password" id="f-UIPW" name="UI_PASSWORD"
+             placeholder="blank keeps the current password" autocomplete="new-password"
+             {% if ui_pw_readonly %}readonly{% endif %}>
+      <div class="hint">Changing it here logs you out immediately.</div>
+    </div>
+
+    <button class="btn primary" type="submit">Save configuration</button>
+  </form>
+</div>
+{% endblock %}

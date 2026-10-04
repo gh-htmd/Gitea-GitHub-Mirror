@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+{% block content %}
+<h1>Sync history</h1>
+<div class="panel">
+  {% if runs %}
+  <table>
+    <tr><th>Time</th><th>Repo</th><th>Direction</th><th>Status</th><th>Duration</th><th>Detail</th></tr>
+    {% for r in runs %}
+    <tr>
+      <td class="muted">{{ r["started_at"] }}</td>
+      <td><code>{{ r["repo"] }}</code></td>
+      <td>{{ r["direction"] }}</td>
+      <td><span class="pill {{ 'ok' if r['status']=='success' else ('skip' if r['status']=='skipped' else 'err') }}">{{ r["status"] }}</span></td>
+      <td class="muted">{{ "%.1f"|format(r["duration_s"] or 0) }}s</td>
+      <td class="muted">{{ r["detail"] or "" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No sync runs recorded yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

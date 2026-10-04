@@ -1,0 +1,5 @@
+# Web UI for the encrypted mirror (webui.py)
+flask>=3.0
+gunicorn>=21.0
+# Encrypted mirroring itself needs:
+cryptography>=41.0

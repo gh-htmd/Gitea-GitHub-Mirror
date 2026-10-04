@@ -317,6 +317,29 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 
 ---
 
+## Web UI (Docker)
+
+`webui.py` is a password-gated web interface for the encrypted mirror, designed to run as a Docker container:
+
+- **Dashboard** — simple stats: Gitea repo count, encrypted mirrors on GitHub, last sync (direction/status/time), 24h results, and recent runs.
+- **Repositories** — per-repo encryption keys: give any repo its **own key**, or leave it on the **shared** `ENCRYPTION_PASSPHRASE`. Keys are never displayed back, only "custom key / shared key" badges. Each row shows last push/pull status and has push/pull buttons; "push all / pull all" included.
+- **Config** — every setting (Gitea/GitHub credentials, shared passphrase, workers, schedule) is seeded from environment variables and editable in the UI. Values set via real env vars show as read-only; the rest persist to the data volume's `.env` file.
+- **History** — full log of past sync runs per repo.
+- **Scheduler** — optional built-in auto-sync (`AUTO_SYNC=true`, `SYNC_INTERVAL_HOURS`, `SYNC_DIRECTION=push|pull|both`).
+
+```bash
+# 1. Put your secrets in .env (see .env.example — UI_PASSWORD is required)
+# 2. Start the UI
+docker compose up --build mirror-ui
+# 3. Open http://localhost:5000 and log in with UI_PASSWORD
+```
+
+The `./data` volume persists the UI-managed `.env`, the per-repo key store, and the stats database across restarts. The same image can still run the CLIs by overriding the command, e.g. `command: ["python3", "encrypted_mirror.py", "push", "--yes"]`.
+
+Per-repo keys also work from the CLI: `--keys-file keys.json` (or `KEYS_FILE` env) with `{"myrepo": "its-passphrase"}` — repos without an entry fall back to `ENCRYPTION_PASSPHRASE`.
+
+---
+
 ## Project Structure
 
 ```
@@ -324,7 +347,14 @@ gitea-github-mirror/
 ├── mirror.py                    # Main application (single-file, zero deps)
 ├── encrypted_mirror.py          # Encrypted Gitea ⇄ GitHub mirroring (push/pull)
 ├── crypto.py                    # AES-256-GCM passphrase encryption module
+├── webui.py                     # Password-gated web UI (dashboard, keys, config)
+├── templates/                   # Web UI pages (login, dashboard, repos, runs, config)
 ├── requirements-encrypted.txt   # Extra dep for encrypted mirroring (cryptography)
+├── requirements-webui.txt       # Web UI deps (flask, gunicorn, cryptography)
+├── tests/
+│   ├── test_mirror.py
+│   ├── test_crypto.py
+│   └── test_webui.py
 ├── .env.example                 # Environment variable template
 ├── Dockerfile                   # Minimal Alpine-based Docker image
 ├── docker-compose.yml           # Docker Compose with optional cron scheduler

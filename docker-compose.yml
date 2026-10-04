@@ -13,6 +13,33 @@ services:
     # Override default CMD to customize language or behavior:
     # command: ["--lang", "cn", "--yes", "--include-orgs"]
 
+  # Web UI for the encrypted mirror (password-gated).
+  # Serves the dashboard on http://localhost:5000 : config management,
+  # per-repo encryption keys, sync stats, manual + scheduled push/pull.
+  mirror-ui:
+    # image: ghcr.io/yuanweize/gitea-github-mirror:latest
+    build: .
+    container_name: gitea-mirror-ui
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      # Required: the UI refuses to start without a password.
+      UI_PASSWORD: ${UI_PASSWORD:?Set UI_PASSWORD in your .env or shell}
+      # Optional scheduling (also editable in the UI Config page):
+      # AUTO_SYNC: "true"
+      # SYNC_INTERVAL_HOURS: "12"
+      # SYNC_DIRECTION: "push"   # push | pull | both
+    volumes:
+      # Persists the UI-managed .env, per-repo keys and the stats database.
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    # Run a CLI instead of the UI, e.g.:
+    # command: ["python3", "encrypted_mirror.py", "push", "--yes"]
+
   # Optional: Run on a schedule with ofelia (cron for Docker)
   # Uncomment below to auto-run the mirror every 6 hours:
   #

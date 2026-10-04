@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Repositories{% endblock %}
+{% block content %}
+<h1>Repositories</h1>
+
+{% if error %}
+<div class="flash error">{{ error }}</div>
+{% endif %}
+
+<div class="panel">
+  <p class="muted" style="margin-top:0;">
+    Each repo is encrypted with its <strong>own key</strong> when you set one below,
+    otherwise it falls back to the <strong>shared key</strong>
+    (<code>ENCRYPTION_PASSPHRASE</code> —
+    {% if global_key_set %}<span class="pill ok">set</span>{% else %}<span class="pill err">not set</span>{% endif %}).
+    Keys are never displayed back — only whether a custom key exists.
+  </p>
+  <div class="toolbar">
+    <form class="inline" method="post" action="{{ url_for('run') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="mode" value="push">
+      <input type="hidden" name="next" value="{{ url_for('repos') }}">
+      <button class="btn primary" type="submit" {% if running.push %}disabled{% endif %}>
+        {% if running.push %}Pushing…{% else %}⬆ Push all{% endif %}
+      </button>
+    </form>
+    <form class="inline" method="post" action="{{ url_for('run') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="mode" value="pull">
+      <input type="hidden" name="next" value="{{ url_for('repos') }}">
+      <button class="btn primary" type="submit" {% if running.pull %}disabled{% endif %}>
+        {% if running.pull %}Pulling…{% else %}⬇ Pull all{% endif %}
+      </button>
+    </form>
+  </div>
+  <table>
+    <tr>
+      <th>Repo</th>
+      <th>Encryption key</th>
+      <th>Last push</th>
+      <th>Last pull</th>
+      <th>Actions</th>
+    </tr>
+    {% for r in rows %}
+    <tr>
+      <td><code>{{ r["name"] }}</code></td>
+      <td>
+        {% if r["key"] == "custom" %}
+          <span class="pill info">custom key</span>
+          <form class="inline" method="post" action="{{ url_for('clear_key', repo=r['name']) }}"
+                onsubmit="return confirm('Remove the custom key for {{ r['name'] }} and fall back to the shared key?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn danger" type="submit" title="Fall back to shared key">clear</button>
+          </form>
+        {% else %}
+          <span class="pill mut">shared key</span>
+          <form class="inline keyform" method="post" action="{{ url_for('set_key', repo=r['name']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="password" name="passphrase" placeholder="new custom key" autocomplete="new-password">
+            <button class="btn" type="submit">set</button>
+          </form>
+        {% endif %}
+      </td>
+      <td>
+        {% if r["push"] %}
+          <span class="pill {{ 'ok' if r['push']['status']=='success' else ('skip' if r['push']['status']=='skipped' else 'err') }}">{{ r["push"]["status"] }}</span>
+          <div class="muted">{{ r["push"]["started_at"] }}</div>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td>
+        {% if r["pull"] %}
+          <span class="pill {{ 'ok' if r['pull']['status']=='success' else ('skip' if r['pull']['status']=='skipped' else 'err') }}">{{ r["pull"]["status"] }}</span>
+          <div class="muted">{{ r["pull"]["started_at"] }}</div>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td>
+        <div class="row-actions">
+          <form class="inline" method="post" action="{{ url_for('run') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="mode" value="push">
+            <input type="hidden" name="repo" value="{{ r['name'] }}">
+            <input type="hidden" name="next" value="{{ url_for('repos') }}">
+            <button class="btn" type="submit" {% if running.push %}disabled{% endif %}>⬆ push</button>
+          </form>
+          <form class="inline" method="post" action="{{ url_for('run') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="mode" value="pull">
+            <input type="hidden" name="repo" value="{{ r['name'] }}">
+            <input type="hidden" name="next" value="{{ url_for('repos') }}">
+            <button class="btn" type="submit" {% if running.pull %}disabled{% endif %}>⬇ pull</button>
+          </form>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if not rows and not error %}
+  <p class="muted">No Gitea repos found for your user.</p>
+  {% endif %}
+</div>
+{% endblock %}

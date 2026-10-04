@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if stats.error %}
+<div class="flash error">{{ stats.error }}</div>
+{% endif %}
+
+<div class="cards">
+  <div class="card">
+    <div class="k">Gitea repos</div>
+    <div class="v">{{ stats.gitea_repos }}</div>
+    <div class="s">tracked for encrypted push</div>
+  </div>
+  <div class="card">
+    <div class="k">Encrypted on GitHub</div>
+    <div class="v">{{ stats.github_encrypted }}</div>
+    <div class="s">mirrors with the encrypted marker</div>
+  </div>
+  <div class="card">
+    <div class="k">Last sync</div>
+    <div class="v" style="font-size:18px;">
+      {% if last_sync %}{{ last_sync["direction"] }} · {{ last_sync["finished_at"] }}{% else %}—{% endif %}
+    </div>
+    <div class="s">{% if last_sync %}
+      <span class="pill {{ 'ok' if last_sync['status']=='success' else ('skip' if last_sync['status']=='skipped' else 'err') }}">{{ last_sync["status"] }}</span>
+    {% else %}no runs recorded yet{% endif %}</div>
+  </div>
+  <div class="card">
+    <div class="k">Last 24 hours</div>
+    <div class="v" style="font-size:18px;">
+      {{ last_24h.get("success", 0) }} ok · {{ last_24h.get("failed", 0) }} failed
+    </div>
+    <div class="s">{{ last_24h.get("skipped", 0) }} skipped ·
+      auto-sync {% if auto_sync %}<span class="pill ok">on</span>{% else %}<span class="pill mut">off</span>{% endif %}</div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Sync now</h2>
+  <div class="toolbar">
+    <form class="inline" method="post" action="{{ url_for('run') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="mode" value="push">
+      <input type="hidden" name="next" value="{{ url_for('dashboard') }}">
+      <button class="btn primary" type="submit" {% if running.push %}disabled{% endif %}>
+        {% if running.push %}Pushing…{% else %}⬆ Push all (encrypt → GitHub){% endif %}
+      </button>
+    </form>
+    <form class="inline" method="post" action="{{ url_for('run') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="mode" value="pull">
+      <input type="hidden" name="next" value="{{ url_for('dashboard') }}">
+      <button class="btn primary" type="submit" {% if running.pull %}disabled{% endif %}>
+        {% if running.pull %}Pulling…{% else %}⬇ Pull all (decrypt → Gitea){% endif %}
+      </button>
+    </form>
+    <span class="muted">Schedule: {% if auto_sync %}every {{ interval }}h, {{ direction }}{% else %}disabled{% endif %}
+      — <a href="{{ url_for('config') }}">change in Config</a></span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Recent runs</h2>
+  {% if recent %}
+  <table>
+    <tr><th>Time</th><th>Repo</th><th>Direction</th><th>Status</th><th>Duration</th><th>Detail</th></tr>
+    {% for r in recent %}
+    <tr>
+      <td class="muted">{{ r["started_at"] }}</td>
+      <td><code>{{ r["repo"] }}</code></td>
+      <td>{{ r["direction"] }}</td>
+      <td><span class="pill {{ 'ok' if r['status']=='success' else ('skip' if r['status']=='skipped' else 'err') }}">{{ r["status"] }}</span></td>
+      <td class="muted">{{ "%.1f"|format(r["duration_s"] or 0) }}s</td>
+      <td class="muted">{{ r["detail"] or "" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p><a href="{{ url_for('runs') }}">Full history →</a></p>
+  {% else %}
+  <p class="muted">No sync runs recorded yet. Trigger one above to get started.</p>
+  {% endif %}
+</div>
+{% endblock %}

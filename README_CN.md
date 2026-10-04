@@ -314,6 +314,29 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 
 ---
 
+## Web 界面（Docker）
+
+`webui.py` 是加密镜像的密码保护 Web 界面，专为 Docker 容器运行设计：
+
+- **仪表盘** — 简单统计：Gitea 仓库数、GitHub 上的加密镜像数、最近一次同步（方向/状态/时间）、24 小时结果、最近运行记录。
+- **仓库管理** — 每个仓库可设置**独立密钥**，不设置则使用共享的 `ENCRYPTION_PASSPHRASE`。密钥永不回显，只显示"独立密钥 / 共享密钥"徽标。每行显示最近推送/拉取状态，并有推送/拉取按钮，另有"全部推送 / 全部拉取"。
+- **配置** — 所有设置（Gitea/GitHub 凭证、共享口令、并发数、定时计划）均由环境变量初始化，可在界面中修改。通过真实环境变量设置的值显示为只读；其余保存到数据卷的 `.env` 文件。
+- **历史记录** — 每个仓库历次同步的完整记录。
+- **定时计划** — 内置可选自动同步（`AUTO_SYNC=true`、`SYNC_INTERVAL_HOURS`、`SYNC_DIRECTION=push|pull|both`）。
+
+```bash
+# 1. 把密钥写入 .env（参考 .env.example，UI_PASSWORD 必填）
+# 2. 启动界面
+docker compose up --build mirror-ui
+# 3. 打开 http://localhost:5000，用 UI_PASSWORD 登录
+```
+
+`./data` 卷持久化保存界面管理的 `.env`、各仓库密钥库和统计数据库，重启不丢失。同一镜像也可通过覆盖 command 运行命令行版本，例如 `command: ["python3", "encrypted_mirror.py", "push", "--yes"]`。
+
+独立密钥在命令行同样可用：`--keys-file keys.json`（或 `KEYS_FILE` 环境变量），内容如 `{"myrepo": "its-passphrase"}`——没有条目的仓库回退到 `ENCRYPTION_PASSPHRASE`。
+
+---
+
 ## 项目结构
 
 ```
@@ -321,7 +344,14 @@ gitea-github-mirror/
 ├── mirror.py                    # 主程序（单文件，零依赖）
 ├── encrypted_mirror.py          # 加密双向镜像（推送/拉取）
 ├── crypto.py                    # AES-256-GCM 口令加密模块
+├── webui.py                     # 密码保护的 Web 界面（仪表盘、密钥、配置）
+├── templates/                   # Web 界面页面（登录、仪表盘、仓库、历史、配置）
 ├── requirements-encrypted.txt   # 加密镜像的额外依赖（cryptography）
+├── requirements-webui.txt       # Web 界面依赖（flask、gunicorn、cryptography）
+├── tests/
+│   ├── test_mirror.py
+│   ├── test_crypto.py
+│   └── test_webui.py
 ├── .env.example                 # 环境变量模板
 ├── Dockerfile                   # 轻量级 Alpine Docker 镜像
 ├── docker-compose.yml           # Docker Compose（含可选定时调度器）

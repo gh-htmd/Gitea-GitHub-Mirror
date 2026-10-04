@@ -35,6 +35,9 @@ Environment variables (or .env file — shared with mirror.py):
     GITEA_URL, GITEA_TOKEN, GITEA_USER
     GITHUB_TOKEN, GITHUB_USER
     ENCRYPTION_PASSPHRASE   - the encryption key (prompted if a TTY and unset)
+    KEYS_FILE               - (Optional) JSON file mapping repo names to per-repo
+                              passphrases, e.g. {"myrepo": "secret"}; repos without
+                              an entry fall back to ENCRYPTION_PASSPHRASE
     GITHUB_MIRROR_PRIVATE   - create GitHub mirror repos as private (default: true)
     SKIP_REPOS              - comma-separated repo names to skip
     MAX_WORKERS             - concurrent workers (default: 5)
@@ -739,6 +742,38 @@ def _result(name: str, start: float, status: str, error: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+def load_keys_file(path: str) -> Dict[str, str]:
+    """Load per-repo passphrases from a JSON file: {"repo-name": "passphrase"}."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise EncryptionConfigError(f"Keys file not found: {path}")
+    except (OSError, json.JSONDecodeError) as e:
+        raise EncryptionConfigError(f"Could not read keys file {path}: {e}")
+    if not isinstance(data, dict):
+        raise EncryptionConfigError(
+            f"Keys file {path} must be a JSON object of repo -> passphrase."
+        )
+    keys = {}
+    for repo, pw in data.items():
+        if not isinstance(repo, str) or not isinstance(pw, str) or not pw:
+            raise EncryptionConfigError(f"Keys file {path}: invalid entry for repo {repo!r}.")
+        keys[repo] = pw
+    return keys
+
+
+class EncryptionConfigError(Exception):
+    """Bad encryption key configuration."""
+
+
+def resolve_passphrase(cfg: Dict[str, Any], repo_name: str) -> Optional[str]:
+    """Per-repo passphrase if configured, else the shared global one, else None."""
+    per_repo = cfg.get("repo_keys") or {}
+    if repo_name in per_repo:
+        return per_repo[repo_name]
+    return cfg.get("passphrase") or None
+
+
 def _load_config(logger: logging.Logger) -> Dict[str, Any]:
     if _MIRROR_AVAILABLE:
         mirror.load_env_file(ENV_FILE)
@@ -760,7 +795,15 @@ def _load_config(logger: logging.Logger) -> Dict[str, Any]:
         in {"1", "true", "yes", "on"},
         "max_workers": int(os.environ.get("MAX_WORKERS", "5")),
         "skip_repos": {r.strip() for r in os.environ.get("SKIP_REPOS", "").split(",") if r.strip()},
+        "repo_keys": {},
     }
+    keys_file = os.environ.get("KEYS_FILE", "").strip()
+    if keys_file:
+        try:
+            cfg["repo_keys"] = load_keys_file(keys_file)
+        except EncryptionConfigError as e:
+            logger.error(str(e))
+            sys.exit(1)
     missing = [
         var
         for var, key in [
@@ -776,11 +819,17 @@ def _load_config(logger: logging.Logger) -> Dict[str, Any]:
         logger.error(f"Missing required env vars: {', '.join(missing)} (.env or export)")
         sys.exit(1)
     if not cfg["passphrase"]:
-        if sys.stdin.isatty():
+        if sys.stdin.isatty() and not cfg["repo_keys"]:
             cfg["passphrase"] = getpass.getpass("Encryption passphrase (hidden input): ")
-        if not cfg["passphrase"]:
-            logger.error("ENCRYPTION_PASSPHRASE is required for encrypted mirroring.")
+        if not cfg["passphrase"] and not cfg["repo_keys"]:
+            logger.error(
+                "ENCRYPTION_PASSPHRASE is required (or per-repo keys via KEYS_FILE/--keys-file)."
+            )
             sys.exit(1)
+        if not cfg["passphrase"]:
+            logger.warning(
+                "No global ENCRYPTION_PASSPHRASE set: repos without a per-repo key will be skipped."
+            )
     return cfg
 
 
@@ -793,6 +842,10 @@ def _filter_repos(names: List[str], only: Optional[List[str]], skip: set) -> Lis
 
 
 def _install_sigint_handler(logger: logging.Logger):
+    # signal.signal only works in the main thread; the web UI runs syncs in
+    # background threads, where there is nothing to install.
+    if threading.current_thread() is not threading.main_thread():
+        return None
     original = signal.getsignal(signal.SIGINT)
 
     def _handler(sig, frame):
@@ -802,6 +855,11 @@ def _install_sigint_handler(logger: logging.Logger):
 
     signal.signal(signal.SIGINT, _handler)
     return original
+
+
+def _restore_sigint_handler(original) -> None:
+    if original is not None and threading.current_thread() is threading.main_thread():
+        _restore_sigint_handler(original)
 
 
 def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logger) -> int:
@@ -841,6 +899,18 @@ def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
             for idx, name in enumerate(names, 1):
                 if _shutdown_event.is_set():
                     break
+                passphrase = resolve_passphrase(cfg, name)
+                if not passphrase:
+                    results.append(
+                        _result(
+                            name,
+                            time.time(),
+                            "failed",
+                            "No encryption key: set ENCRYPTION_PASSPHRASE or a per-repo key.",
+                        )
+                    )
+                    _log_result(logger, idx, len(names), results[-1])
+                    continue
                 gitea_clone = https_clone_url(
                     cfg["gitea_url"], cfg["gitea_user"], cfg["gitea_token"], cfg["gitea_user"], name
                 )
@@ -862,7 +932,7 @@ def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
                         "token": cfg["github_token"],
                         "private": cfg["github_private"],
                     },
-                    passphrase=cfg["passphrase"],
+                    passphrase=passphrase,
                     work_root=work_root,
                     dry_run=args.dry_run,
                     verify=not args.no_verify,
@@ -880,9 +950,9 @@ def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
                 with _print_lock:
                     _log_result(logger, idx, len(names), res)
     finally:
-        signal.signal(signal.SIGINT, original)
+        _restore_sigint_handler(original)
         shutil.rmtree(work_root, ignore_errors=True)
-    return _summarize(results, logger, args)
+    return _summarize(results, logger, args, cfg)
 
 
 def run_pull(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logger) -> int:
@@ -933,6 +1003,18 @@ def run_pull(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
             for idx, name in enumerate(encrypted_names, 1):
                 if _shutdown_event.is_set():
                     break
+                passphrase = resolve_passphrase(cfg, name)
+                if not passphrase:
+                    results.append(
+                        _result(
+                            name,
+                            time.time(),
+                            "failed",
+                            "No encryption key: set ENCRYPTION_PASSPHRASE or a per-repo key.",
+                        )
+                    )
+                    _log_result(logger, idx, len(encrypted_names), results[-1])
+                    continue
                 github_clone = https_clone_url(
                     "https://github.com",
                     cfg["github_user"],
@@ -955,7 +1037,7 @@ def run_pull(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
                         "token": cfg["gitea_token"],
                         "private": True,
                     },
-                    passphrase=cfg["passphrase"],
+                    passphrase=passphrase,
                     work_root=work_root,
                     dry_run=args.dry_run,
                     verify=not args.no_verify,
@@ -973,9 +1055,9 @@ def run_pull(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
                 with _print_lock:
                     _log_result(logger, idx, len(encrypted_names), res)
     finally:
-        signal.signal(signal.SIGINT, original)
+        _restore_sigint_handler(original)
         shutil.rmtree(work_root, ignore_errors=True)
-    return _summarize(results, logger, args)
+    return _summarize(results, logger, args, cfg)
 
 
 def _log_result(logger: logging.Logger, idx: int, total: int, res: Dict[str, Any]) -> None:
@@ -985,7 +1067,10 @@ def _log_result(logger: logging.Logger, idx: int, total: int, res: Dict[str, Any
 
 
 def _summarize(
-    results: List[Dict[str, Any]], logger: logging.Logger, args: argparse.Namespace
+    results: List[Dict[str, Any]],
+    logger: logging.Logger,
+    args: argparse.Namespace,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> int:
     counts = {"success": 0, "skipped": 0, "failed": 0}
     for r in results:
@@ -1002,6 +1087,14 @@ def _summarize(
     if _MIRROR_AVAILABLE and not args.dry_run and results:
         try:
             mirror.generate_report(results, sum(r["duration"] for r in results), 1, 0, "en", logger)
+        except Exception:
+            pass
+    # Hook for embedders (e.g. the web UI): cfg["result_sink"] receives the
+    # per-repo result dicts so they can be recorded (stats, history).
+    sink = cfg.get("result_sink") if isinstance(cfg, dict) else None
+    if sink:
+        try:
+            sink(results)
         except Exception:
             pass
     return 1 if counts["failed"] else 0
@@ -1032,6 +1125,13 @@ def main() -> None:
         action="store_true",
         help="Skip decrypt-and-verify of bundles before pushing.",
     )
+    parser.add_argument(
+        "--keys-file",
+        default=None,
+        help="JSON file mapping repo names to per-repo passphrases "
+        "(overrides KEYS_FILE env). Repos without an entry fall back to "
+        "ENCRYPTION_PASSPHRASE.",
+    )
     args = parser.parse_args()
     if args.only:
         args.only = [o.strip() for o in args.only.split(",") if o.strip()]
@@ -1050,6 +1150,12 @@ def main() -> None:
         sys.exit(1)
 
     cfg = _load_config(logger)
+    if args.keys_file:
+        try:
+            cfg["repo_keys"] = load_keys_file(args.keys_file)
+        except EncryptionConfigError as e:
+            logger.error(str(e))
+            sys.exit(1)
     if args.mode == "push":
         sys.exit(run_push(cfg, args, logger))
     else:
