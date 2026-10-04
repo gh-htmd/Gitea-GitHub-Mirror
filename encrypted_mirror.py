@@ -79,7 +79,7 @@ except ImportError:  # pragma: no cover - standalone fallback
     _MIRROR_AVAILABLE = False
     mirror = None  # type: ignore
 
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 ENV_FILE = SCRIPT_DIR / ".env"

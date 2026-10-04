@@ -51,7 +51,7 @@
 | **零依赖** | 纯 Python 3 标准库，无需 `pip install` |
 | **加密镜像** | `encrypted_mirror.py`：Gitea → GitHub 推送 AES-256-GCM 加密包（GitHub 上不可读）；GitHub → Gitea 解密恢复 |
 
-> **💡 v2.5.0 亮点：** 加密双向镜像——Gitea 仓库加密推送到 GitHub、解密拉回 Gitea。严格的 GitHub 组织架构镜像 (PRESERVE_ORGS)、`SYNC_NOW` 立即触发老仓库同步，以及 `FORCE_RECREATE` 强制删除重建。
+> **💡 v2.6.0 亮点：** 加密双向镜像——Gitea 仓库加密推送到 GitHub、解密拉回 Gitea。严格的 GitHub 组织架构镜像 (PRESERVE_ORGS)、`SYNC_NOW` 立即触发老仓库同步，以及 `FORCE_RECREATE` 强制删除重建。
 
 ---
 
@@ -469,7 +469,7 @@ sequenceDiagram
 # 📊 执行报告
 
 **日期:** 2026-05-27 14:30:00
-**版本:** v2.5.0
+**版本:** v2.6.0
 **模式:** 并发同步 (Multi-threaded)
 
 ## 汇总

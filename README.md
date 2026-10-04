@@ -49,7 +49,7 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
 | **Encrypted Mirroring** | `encrypted_mirror.py`: Gitea → GitHub pushes AES-256-GCM encrypted bundles (unreadable on GitHub); GitHub → Gitea decrypts and restores |
 
-> **💡 v2.5.0 Highlights:** Encrypted bidirectional mirroring — push Gitea repos to GitHub fully encrypted, pull them back decrypted into Gitea. Strict GitHub Organization replication (PRESERVE_ORGS), `SYNC_NOW` for instant updates, and `FORCE_RECREATE` for full remigrations.
+> **💡 v2.6.0 Highlights:** Encrypted bidirectional mirroring — push Gitea repos to GitHub fully encrypted, pull them back decrypted into Gitea. Strict GitHub Organization replication (PRESERVE_ORGS), `SYNC_NOW` for instant updates, and `FORCE_RECREATE` for full remigrations.
 
 ---
 
@@ -471,7 +471,7 @@ After each run, a Markdown report is generated in the `reports/` directory:
 # 📊 Execution Report
 
 **Date:** 2026-05-27 14:30:00
-**Version:** v2.5.0
+**Version:** v2.6.0
 **Mode:** Concurrent (strict synchronous per worker)
 
 ## Summary
