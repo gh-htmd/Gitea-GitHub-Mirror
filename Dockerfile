@@ -10,7 +10,10 @@ WORKDIR /app
 RUN adduser -D -u 1000 mirror
 
 # Copy application
-COPY mirror.py .
+COPY mirror.py encrypted_mirror.py crypto.py requirements-encrypted.txt .env.example ./
+
+# Extra dependency for encrypted mirroring (kept out of mirror.py's zero-dep path)
+RUN pip install --no-cache-dir -r requirements-encrypted.txt
 
 # Create persistent directories
 RUN mkdir -p /app/logs /app/reports && \

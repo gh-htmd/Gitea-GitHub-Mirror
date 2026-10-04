@@ -1,0 +1,3 @@
+# Only needed for the encrypted-mirror feature (encrypted_mirror.py).
+# The classic plaintext mirror (mirror.py) remains dependency-free.
+cryptography>=41.0

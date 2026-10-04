@@ -47,8 +47,9 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | **Auto-Rotation** | Old logs (max 30) and reports (max 50) automatically pruned |
 | **Graceful Shutdown** | Ctrl+C triggers clean exit — finishes in-flight tasks, generates report |
 | **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
+| **Encrypted Mirroring** | `encrypted_mirror.py`: Gitea → GitHub pushes AES-256-GCM encrypted bundles (unreadable on GitHub); GitHub → Gitea decrypts and restores |
 
-> **💡 v2.4.0 Highlights:** Strict GitHub Organization replication (PRESERVE_ORGS), `SYNC_NOW` for instant updates, and `FORCE_RECREATE` for full remigrations.
+> **💡 v2.5.0 Highlights:** Encrypted bidirectional mirroring — push Gitea repos to GitHub fully encrypted, pull them back decrypted into Gitea. Strict GitHub Organization replication (PRESERVE_ORGS), `SYNC_NOW` for instant updates, and `FORCE_RECREATE` for full remigrations.
 
 ---
 
@@ -267,11 +268,63 @@ python3 mirror.py --workers 10 --timeout 900
 
 ---
 
+## Encrypted Mirroring (Gitea ⇄ GitHub, unreadable on GitHub)
+
+`encrypted_mirror.py` adds bidirectional **encrypted** mirroring on top of the classic plaintext flow:
+
+| Direction | Command | What happens |
+|-----------|---------|--------------|
+| **Push** `Gitea → GitHub` | `python3 encrypted_mirror.py push` | Each Gitea repo is serialized with `git bundle --all` (full history, every branch and tag), encrypted with **AES-256-GCM** (PBKDF2-HMAC-SHA256 key derivation, random salt+nonce per file), and pushed to GitHub as `<repo>.bundle.enc` |
+| **Pull** `GitHub → Gitea` | `python3 encrypted_mirror.py pull` | Repos carrying the `.gitea-encrypted-mirror` marker are cloned, decrypted with your passphrase, verified (`git bundle verify` + SHA-256 fingerprint check), and `git push --mirror`ed to Gitea with the default branch restored |
+
+**Security properties**
+
+- The GitHub side **never sees plaintext**: file names, file contents, commit messages, author names and branch names are all sealed inside the encrypted bundle. A GitHub repo contains only the opaque `<repo>.bundle.enc` blob, the plaintext marker (format version + SHA-256 fingerprint), and a README explaining the repo is encrypted.
+- Tampering is detected: AES-GCM authentication plus a SHA-256 fingerprint of the plaintext bundle stored in the marker. A wrong passphrase or modified bundle fails loudly — nothing is pushed anywhere.
+- Every push verifies the round-trip first: the bundle is decrypted in memory and `git bundle verify` runs before anything touches GitHub (`--no-verify` to skip).
+- Unchanged repos are skipped automatically (plaintext-bundle fingerprint comparison).
+- Tokens are URL-encoded into clone URLs and **redacted from all logs and error messages**.
+
+**Setup**
+
+```bash
+# 1. Install the one extra dependency (classic mirror.py stays dependency-free)
+pip install -r requirements-encrypted.txt
+
+# 2. Configure — same GITEA_URL/GITEA_TOKEN/GITEA_USER and
+#    GITHUB_TOKEN/GITHUB_USER as mirror.py, plus:
+ENCRYPTION_PASSPHRASE="your-strong-passphrase-here"   # or: prompted interactively
+GITHUB_MIRROR_PRIVATE=true                            # keep GitHub mirrors private (default)
+
+# 3a. Push everything from Gitea to GitHub, encrypted
+python3 encrypted_mirror.py push --yes
+
+# 3b. Later, restore an encrypted mirror back into Gitea (decrypted)
+python3 encrypted_mirror.py pull --only my-repo --yes
+
+# Useful flags: --only repo1,repo2  --dry-run  --workers 5
+#               --all-gitea (push: include Gitea org repos, default is GITEA_USER only)
+```
+
+**Notes & limitations**
+
+- `ENCRYPTION_PASSPHRASE` **is** the key to your backups. Lose it and the GitHub mirrors are unrecoverable — store it in a password manager, never commit it.
+- Git history of the encrypted GitHub repo retains older encrypted bundles; rotating the passphrase only re-encrypts future pushes.
+- Repos with Git LFS objects are bundled without the LFS file contents (`git bundle` limitation).
+- Empty repos (no commits) are skipped.
+- Each encrypted GitHub repo keeps its own sync history (one commit per sync); the marker makes encrypted mirrors auto-detectable on `pull`.
+- A scheduled GitHub Actions workflow is included: `.github/workflows/encrypted-mirror.yml` (manual dispatch; uncomment the `schedule` block to run it on a cron). Required secrets: `GITEA_URL`, `GITEA_TOKEN`, `GITEA_USER`, `MIRROR_GITHUB_TOKEN`, `GITHUB_USER`, `ENCRYPTION_PASSPHRASE`.
+
+---
+
 ## Project Structure
 
 ```
 gitea-github-mirror/
 ├── mirror.py                    # Main application (single-file, zero deps)
+├── encrypted_mirror.py          # Encrypted Gitea ⇄ GitHub mirroring (push/pull)
+├── crypto.py                    # AES-256-GCM passphrase encryption module
+├── requirements-encrypted.txt   # Extra dep for encrypted mirroring (cryptography)
 ├── .env.example                 # Environment variable template
 ├── Dockerfile                   # Minimal Alpine-based Docker image
 ├── docker-compose.yml           # Docker Compose with optional cron scheduler
@@ -285,7 +338,8 @@ gitea-github-mirror/
 └── .github/
     └── workflows/
         ├── docker-publish.yml   # CI/CD: auto-build & push to GHCR
-        └── mirror-sync.yml      # Scheduled/manual mirror execution
+        ├── mirror-sync.yml      # Scheduled/manual mirror execution
+        └── encrypted-mirror.yml # Scheduled/manual ENCRYPTED mirror execution
 ```
 
 ---
@@ -387,7 +441,7 @@ After each run, a Markdown report is generated in the `reports/` directory:
 # 📊 Execution Report
 
 **Date:** 2026-05-27 14:30:00
-**Version:** v2.4.0
+**Version:** v2.5.0
 **Mode:** Concurrent (strict synchronous per worker)
 
 ## Summary

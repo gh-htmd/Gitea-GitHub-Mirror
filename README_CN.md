@@ -49,8 +49,9 @@
 | **自动轮转** | 日志（最多 30 个）和报告（最多 50 个）自动清理 |
 | **优雅关闭** | Ctrl+C 触发干净退出，完成当前任务后生成报告 |
 | **零依赖** | 纯 Python 3 标准库，无需 `pip install` |
+| **加密镜像** | `encrypted_mirror.py`：Gitea → GitHub 推送 AES-256-GCM 加密包（GitHub 上不可读）；GitHub → Gitea 解密恢复 |
 
-> **💡 v2.4.0 亮点：** 严格的 GitHub 组织架构镜像 (PRESERVE_ORGS)、`SYNC_NOW` 立即触发老仓库同步，以及 `FORCE_RECREATE` 强制删除重建。
+> **💡 v2.5.0 亮点：** 加密双向镜像——Gitea 仓库加密推送到 GitHub、解密拉回 Gitea。严格的 GitHub 组织架构镜像 (PRESERVE_ORGS)、`SYNC_NOW` 立即触发老仓库同步，以及 `FORCE_RECREATE` 强制删除重建。
 
 ---
 
@@ -265,11 +266,62 @@ python3 mirror.py --lang cn --workers 10 --timeout 900
 
 ---
 
+## 加密镜像（Gitea ⇄ GitHub，在 GitHub 上不可读）
+
+`encrypted_mirror.py` 在明文同步的基础上增加了双向**加密**镜像：
+
+| 方向 | 命令 | 说明 |
+|------|------|------|
+| **推送** `Gitea → GitHub` | `python3 encrypted_mirror.py push` | 每个 Gitea 仓库先用 `git bundle --all` 打包（完整历史、所有分支与标签），再用 **AES-256-GCM** 加密（PBKDF2-HMAC-SHA256 派生密钥，每文件随机 salt+nonce），推送到 GitHub 为 `<repo>.bundle.enc` |
+| **拉取** `GitHub → Gitea` | `python3 encrypted_mirror.py pull` | 检测到 `.gitea-encrypted-mirror` 标记的仓库会被克隆、用口令解密、校验（`git bundle verify` + SHA-256 指纹），然后 `git push --mirror` 推送到 Gitea 并恢复默认分支 |
+
+**安全特性**
+
+- GitHub 端**永远见不到明文**：文件名、文件内容、提交信息、作者名、分支名全部封存在加密包内。GitHub 仓库里只有不透明的 `<repo>.bundle.enc`、明文标记文件（格式版本 + SHA-256 指纹）和一份说明 README。
+- 防篡改：AES-GCM 认证 + 标记文件中明文包的 SHA-256 指纹。口令错误或文件被改动会直接失败，不会向任何地方推送。
+- 每次推送前先在内存中解密并 `git bundle verify` 校验（`--no-verify` 可跳过）。
+- 未变更的仓库自动跳过（明文包指纹比对）。
+- 令牌经 URL 编码后嵌入克隆地址，**所有日志与报错信息中自动打码**。
+
+**使用方法**
+
+```bash
+# 1. 安装唯一的额外依赖（经典 mirror.py 保持零依赖）
+pip install -r requirements-encrypted.txt
+
+# 2. 配置——与 mirror.py 相同的 GITEA_URL/GITEA_TOKEN/GITEA_USER、
+#    GITHUB_TOKEN/GITHUB_USER，外加：
+ENCRYPTION_PASSPHRASE="your-strong-passphrase-here"   # 也可在终端交互输入
+GITHUB_MIRROR_PRIVATE=true                            # GitHub 镜像仓库设为私有（默认）
+
+# 3a. 把 Gitea 所有仓库加密推送到 GitHub
+python3 encrypted_mirror.py push --yes
+
+# 3b. 之后把加密镜像解密恢复回 Gitea
+python3 encrypted_mirror.py pull --only my-repo --yes
+
+# 常用参数：--only repo1,repo2  --dry-run  --workers 5
+#           --all-gitea（推送时包含 Gitea 组织仓库，默认仅 GITEA_USER 名下）
+```
+
+**注意事项**
+
+- `ENCRYPTION_PASSPHRASE` **就是备份的钥匙**：丢失则 GitHub 上的镜像永久无法恢复。请存入密码管理器，切勿提交到仓库。
+- 加密 GitHub 仓库的 git 历史会保留旧的加密包；更换口令只影响之后的推送。
+- 受 `git bundle` 限制，Git LFS 大文件内容不会被打包。
+- 空仓库（无提交）会被跳过。
+- 定时任务：`.github/workflows/encrypted-mirror.yml`（默认手动触发，取消 `schedule` 注释即为定时执行）。所需 Secrets：`GITEA_URL`、`GITEA_TOKEN`、`GITEA_USER`、`MIRROR_GITHUB_TOKEN`、`GITHUB_USER`、`ENCRYPTION_PASSPHRASE`。
+
+---
+
 ## 项目结构
 
 ```
 gitea-github-mirror/
 ├── mirror.py                    # 主程序（单文件，零依赖）
+├── encrypted_mirror.py          # 加密双向镜像（推送/拉取）
+├── crypto.py                    # AES-256-GCM 口令加密模块
+├── requirements-encrypted.txt   # 加密镜像的额外依赖（cryptography）
 ├── .env.example                 # 环境变量模板
 ├── Dockerfile                   # 轻量级 Alpine Docker 镜像
 ├── docker-compose.yml           # Docker Compose（含可选定时调度器）
@@ -284,7 +336,8 @@ gitea-github-mirror/
 └── .github/
     └── workflows/
         ├── docker-publish.yml   # CI/CD：自动构建并推送到 GHCR
-        └── mirror-sync.yml      # 定时/手动执行镜像同步
+        ├── mirror-sync.yml      # 定时/手动执行镜像同步
+        └── encrypted-mirror.yml # 定时/手动执行加密镜像同步
 ```
 
 ---
@@ -386,7 +439,7 @@ sequenceDiagram
 # 📊 执行报告
 
 **日期:** 2026-05-27 14:30:00
-**版本:** v2.4.0
+**版本:** v2.5.0
 **模式:** 并发同步 (Multi-threaded)
 
 ## 汇总
