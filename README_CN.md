@@ -2,10 +2,12 @@
 
 # Gitea GitHub Mirror
 
-**将您 GitHub 上的所有仓库批量镜像到自建 Gitea 服务器 — 并发执行、严格校验、结果可靠。**
+**在 GitHub 与自建 Gitea 之间批量镜像 —— 支持 AES-256-GCM 加密镜像与密码保护的 Web 界面。**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
+[![AES-256-GCM Encrypted](https://img.shields.io/badge/Encrypted-AES--256--GCM-red.svg)](#加密镜像gitea--github在-github-上不可读)
+[![Web UI](https://img.shields.io/badge/Web%20UI-Dashboard%20%2B%20Scheduler-blueviolet.svg)](#web-界面docker)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker)](Dockerfile)
 [![GHCR](https://img.shields.io/badge/GHCR-Package-purple.svg?logo=github)](https://github.com/yuanweize/Gitea-GitHub-Mirror/pkgs/container/gitea-github-mirror)
 [![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=github-actions)](https://github.com/yuanweize/Gitea-GitHub-Mirror/actions)
@@ -18,6 +20,13 @@
 *一条命令，全部仓库，多线程并发，严格 201 校验，零误报。* ✨
 
 </div>
+
+---
+
+> ### ✨ 本 Fork 在上游基础上新增两大特性
+>
+> - **🔐 加密镜像** —— `encrypted_mirror.py` 将 Gitea 仓库以 **AES-256-GCM 加密包**形式推送到 GitHub：没有口令，GitHub 上的内容完全不可读。`pull` 则解密并完整恢复到 Gitea。支持每个仓库独立密钥或统一共享密钥。[了解更多](#加密镜像gitea--github在-github-上不可读)
+> - **🖥️ Web 界面** —— 密码保护的仪表盘（Docker）：同步统计、仓库密钥管理、基于环境变量的配置、一键推送/拉取、历史记录、内置定时计划。[了解更多](#web-界面docker)
 
 ---
 
@@ -49,9 +58,10 @@
 | **自动轮转** | 日志（最多 30 个）和报告（最多 50 个）自动清理 |
 | **优雅关闭** | Ctrl+C 触发干净退出，完成当前任务后生成报告 |
 | **零依赖** | 纯 Python 3 标准库，无需 `pip install` |
-| **加密镜像** | `encrypted_mirror.py`：Gitea → GitHub 推送 AES-256-GCM 加密包（GitHub 上不可读）；GitHub → Gitea 解密恢复 |
+| **加密镜像** | `encrypted_mirror.py`：Gitea → GitHub 推送 AES-256-GCM 加密包（GitHub 上不可读）；GitHub → Gitea 解密恢复；支持每仓库独立密钥或统一共享密钥 |
+| **Web 界面** | `webui.py`：密码保护的仪表盘（Docker）——同步统计、仓库密钥管理、基于环境变量的配置、一键推送/拉取、历史记录、内置定时计划 |
 
-> **💡 v2.6.0 亮点：** 加密双向镜像——Gitea 仓库加密推送到 GitHub、解密拉回 Gitea。严格的 GitHub 组织架构镜像 (PRESERVE_ORGS)、`SYNC_NOW` 立即触发老仓库同步，以及 `FORCE_RECREATE` 强制删除重建。
+> **💡 v2.6.0 亮点：** 🖥️ 新增密码保护的 **Web 界面**（Docker），含统计、仓库密钥与定时计划；🔐 **加密双向镜像**——Gitea 仓库加密推送到 GitHub、解密拉回 Gitea。
 
 ---
 

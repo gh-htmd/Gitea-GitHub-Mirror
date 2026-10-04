@@ -2,10 +2,12 @@
 
 # Gitea GitHub Mirror
 
-**Bulk mirror all your GitHub repositories to a self-hosted Gitea instance — concurrent, strict, reliable.**
+**Bulk mirror between GitHub and self-hosted Gitea — with AES-256-GCM encrypted mirroring and a password-gated web UI.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
+[![AES-256-GCM Encrypted](https://img.shields.io/badge/Encrypted-AES--256--GCM-red.svg)](#-encrypted-mirroring-gitea--github-unreadable-on-github)
+[![Web UI](https://img.shields.io/badge/Web%20UI-Dashboard%20%2B%20Scheduler-blueviolet.svg)](#-web-ui-docker)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker)](Dockerfile)
 [![GHCR](https://img.shields.io/badge/GHCR-Package-purple.svg?logo=github)](https://github.com/yuanweize/Gitea-GitHub-Mirror/pkgs/container/gitea-github-mirror)
 [![GitHub Actions](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg?logo=github-actions)](https://github.com/yuanweize/Gitea-GitHub-Mirror/actions)
@@ -18,6 +20,13 @@
 *One command. All repos. Concurrent workers. Strict 201 validation. Zero false positives.* ✨
 
 </div>
+
+---
+
+> ### ✨ This fork adds two headline features on top of upstream
+>
+> - **🔐 Encrypted mirroring** — `encrypted_mirror.py` pushes Gitea repos to GitHub as **AES-256-GCM encrypted bundles**: nothing on GitHub is readable without the passphrase. `pull` decrypts and restores everything into Gitea. Per-repo keys or one shared key. [Learn more](#-encrypted-mirroring-gitea--github-unreadable-on-github)
+> - **🖥️ Web UI** — password-gated dashboard (Docker) with sync stats, per-repo key management, env-based config, one-click push/pull, history, and a built-in scheduler. [Learn more](#-web-ui-docker)
 
 ---
 
@@ -47,9 +56,10 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | **Auto-Rotation** | Old logs (max 30) and reports (max 50) automatically pruned |
 | **Graceful Shutdown** | Ctrl+C triggers clean exit — finishes in-flight tasks, generates report |
 | **Zero Dependencies** | Pure Python 3 stdlib — no `pip install` needed |
-| **Encrypted Mirroring** | `encrypted_mirror.py`: Gitea → GitHub pushes AES-256-GCM encrypted bundles (unreadable on GitHub); GitHub → Gitea decrypts and restores |
+| **Encrypted Mirroring** | `encrypted_mirror.py`: Gitea → GitHub pushes AES-256-GCM encrypted bundles (unreadable on GitHub); GitHub → Gitea decrypts and restores; per-repo keys or one shared key |
+| **Web UI** | `webui.py`: password-gated dashboard (Docker) — sync stats, per-repo key management, env-based config, one-click push/pull, history, built-in scheduler |
 
-> **💡 v2.6.0 Highlights:** Encrypted bidirectional mirroring — push Gitea repos to GitHub fully encrypted, pull them back decrypted into Gitea. Strict GitHub Organization replication (PRESERVE_ORGS), `SYNC_NOW` for instant updates, and `FORCE_RECREATE` for full remigrations.
+> **💡 v2.6.0 Highlights:** 🖥️ New password-gated **web UI** (Docker) with stats, per-repo keys and scheduler, plus 🔐 **encrypted bidirectional mirroring** — push Gitea repos to GitHub fully encrypted, pull them back decrypted into Gitea.
 
 ---
 
