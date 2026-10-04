@@ -61,7 +61,7 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | **Notifications** | Telegram / ntfy / email alerts on sync failures (or every run); test button in the UI; works from the CLI too |
 | **Storage Stats** | Encrypted bundle sizes recorded per push; dashboard shows totals, per-repo breakdown and growth chart |
 
-> **💡 v2.7.0 Highlights:** 🔔 **Notifications** (Telegram/ntfy/email) on sync failures, and 📦 **storage stats** — per-repo encrypted bundle sizes with a growth chart on the dashboard.
+> **💡 v2.8.0 Highlights:** ⚙️ **Every env var configurable in the UI** — new Encrypted-sync and Classic-mirror sections; UI-saved values take effect immediately with no restart.
 
 ---
 
@@ -491,7 +491,7 @@ After each run, a Markdown report is generated in the `reports/` directory:
 # 📊 Execution Report
 
 **Date:** 2026-05-27 14:30:00
-**Version:** v2.7.0
+**Version:** v2.8.0
 **Mode:** Concurrent (strict synchronous per worker)
 
 ## Summary
