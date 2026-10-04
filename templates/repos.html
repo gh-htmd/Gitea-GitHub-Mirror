@@ -64,6 +64,7 @@
       <td>
         {% if r["push"] %}
           <span class="pill {{ 'ok' if r['push']['status']=='success' else ('skip' if r['push']['status']=='skipped' else 'err') }}">{{ r["push"]["status"] }}</span>
+          {% if r["push"]["dest"] %}<span class="muted">→ {{ r["push"]["dest"] }}</span>{% endif %}
           <div class="muted">{{ r["push"]["started_at"] }}</div>
         {% else %}<span class="muted">—</span>{% endif %}
       </td>

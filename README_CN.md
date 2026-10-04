@@ -62,8 +62,9 @@
 | **Web 界面** | `webui.py`：密码保护的仪表盘（Docker）——同步统计、仓库密钥管理、基于环境变量的配置、一键推送/拉取、历史记录、内置定时计划 |
 | **通知** | 同步失败时通过 Telegram / ntfy / 邮件告警（也可每次都通知）；界面中有测试按钮；命令行同样支持 |
 | **存储统计** | 每次推送记录加密包体积；仪表盘展示总量、仓库占比与增长趋势图 |
+| **多目标** | 一次加密推送分发到多个目标（第二个 GitHub 账号、Codeberg/Gitea）；按目标独立检测变更，界面管理带令牌测试，历史与通知按目标列出 |
 
-> **💡 v2.8.0 亮点：** ⚙️ **所有环境变量均可在界面中配置** —— 新增加密同步与经典镜像分组；界面保存的值立即生效，无需重启。
+> **💡 v2.9.0 亮点：** 🌍 **多目标镜像** —— 一次加密推送可同时发往第二个 GitHub 账号和/或 Codeberg。加密包只构建一次，分发到所有目标。在新的界面页面中管理目标（含令牌测试按钮）；历史记录和通知按目标分别列出。
 
 ---
 
@@ -314,6 +315,7 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 
 # 常用参数：--only repo1,repo2  --dry-run  --workers 5
 #           --all-gitea（推送时包含 Gitea 组织仓库，默认仅 GITEA_USER 名下）
+#           --dest label1,label2（推送时仅推送到这些目标；默认全部启用的目标）
 ```
 
 **注意事项**
@@ -323,6 +325,27 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 - 受 `git bundle` 限制，Git LFS 大文件内容不会被打包。
 - 空仓库（无提交）会被跳过。
 - 定时任务：`.github/workflows/encrypted-mirror.yml`（默认手动触发，取消 `schedule` 注释即为定时执行）。所需 Secrets：`GITEA_URL`、`GITEA_TOKEN`、`GITEA_USER`、`MIRROR_GITHUB_TOKEN`、`GITHUB_USER`、`ENCRYPTION_PASSPHRASE`。
+
+---
+
+### 多目标镜像
+
+一次加密推送可以分发到**多个目标**——例如主 GitHub 账号**加上**第二个 GitHub 账号和 Codeberg。加密包只构建**一次**，相同的字节发往所有目标，没有额外的 CPU 开销。
+
+- 每个目标有自己的指纹标记，变更检测是按目标独立的：新加的目标会在下次推送时**自动回填**，未变更的目标会被跳过。
+- 支持的类型：`github`（第二个账号/组织）和 `gitea`（任意 Gitea 服务器，包括 Codeberg）。仓库默认自动创建为私有。
+- 在 Web 界面的 **Destinations** 页面管理：添加/编辑、启用/禁用、删除，以及**测试**按钮（只校验令牌，不做任何修改）。仪表盘展示所有目标；历史记录和通知按目标分别列出。
+- 命令行：目标来自 `MIRROR_DESTINATIONS` 环境变量（JSON 数组）——界面读取的是同一个变量，两边一致。`python3 encrypted_mirror.py push --dest backup-gh` 只推送到该目标。
+
+```bash
+# MIRROR_DESTINATIONS 示例（也可以在 Web 界面中添加）
+MIRROR_DESTINATIONS='[
+  {"label": "backup-gh", "type": "github", "owner": "my-backup-acct", "token": "ghp_...", "private": true},
+  {"label": "codeberg", "type": "gitea", "url": "https://codeberg.org", "owner": "myuser", "token": "...", "private": true}
+]'
+```
+
+**注意：** 拉取（解密 → Gitea）始终从**主** GitHub 目标恢复。`gitea` 类型的目标会以令牌所属用户创建仓库。令牌存放在界面数据库中（不会回显），日志中会被脱敏。
 
 ---
 

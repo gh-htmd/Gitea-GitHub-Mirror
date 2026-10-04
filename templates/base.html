@@ -79,6 +79,7 @@
     <nav>
       <a href="{{ url_for('dashboard') }}" class="{% if request.path=='/' %}active{% endif %}">Dashboard</a>
       <a href="{{ url_for('repos') }}" class="{% if request.path.startswith('/repos') %}active{% endif %}">Repositories</a>
+      <a href="{{ url_for('destinations') }}" class="{% if request.path.startswith('/destinations') %}active{% endif %}">Destinations</a>
       <a href="{{ url_for('runs') }}" class="{% if request.path.startswith('/runs') %}active{% endif %}">History</a>
       <a href="{{ url_for('config') }}" class="{% if request.path.startswith('/config') %}active{% endif %}">Config</a>
     </nav>

@@ -443,3 +443,120 @@ def test_build_cfg_merges_keys_file(client, tmp_path):
     assert cfg["repo_keys"]["repo-b"] == "file-key-b"  # file key as fallback
     webui.clear_repo_key("repo-a")
     _csrf_post(client, "/config", {"KEYS_FILE": ""})
+
+
+def _add_dest(client, label="backup-gh", **kw):
+    data = {
+        "label": label,
+        "type": kw.get("type", "github"),
+        "url": kw.get("url", ""),
+        "owner": kw.get("owner", "backupuser"),
+        "username": kw.get("username", ""),
+        "token": kw.get("token", "tok123"),
+    }
+    if kw.get("private", True):
+        data["private"] = "on"
+    return _csrf_post(client, "/destinations", data)
+
+
+def test_destinations_crud(client):
+    _login(client)
+    rv = client.get("/destinations")
+    assert rv.status_code == 200
+    assert b"Push destinations" in rv.data
+
+    rv = _add_dest(client)
+    assert rv.status_code == 302
+    dest = webui.get_destination("backup-gh")
+    assert dest is not None
+    assert dest["url"] == "https://github.com"
+    assert dest["username"] == "backupuser"  # defaults to owner
+    assert dest["source"] == "ui"
+
+    # toggle off
+    rv = _csrf_post(client, "/destinations/backup-gh/toggle", {})
+    assert rv.status_code == 302
+    assert webui.get_destination("backup-gh")["enabled"] is False
+    dests = em.load_extra_destinations()
+    assert next(d for d in dests if d["label"] == "backup-gh")["enabled"] is False
+
+    # toggle on
+    _csrf_post(client, "/destinations/backup-gh/toggle", {})
+    assert webui.get_destination("backup-gh")["enabled"] is True
+
+    # delete
+    rv = _csrf_post(client, "/destinations/backup-gh/delete", {})
+    assert rv.status_code == 302
+    assert webui.get_destination("backup-gh") is None
+
+
+def test_destinations_validation(client):
+    csrf = _login(client)
+
+    def _post(label, token):
+        return client.post(
+            "/destinations",
+            data={
+                "csrf_token": csrf,
+                "label": label,
+                "type": "github",
+                "owner": "x",
+                "token": token,
+            },
+            follow_redirects=True,
+        )
+
+    rv = _post("no-token", "")
+    assert b"required" in rv.data
+    assert webui.get_destination("no-token") is None
+    # reserved label
+    _post("primary", "t")
+    assert webui.get_destination("primary") is None
+
+
+def test_destinations_env_readonly(client, monkeypatch):
+    _login(client)
+    monkeypatch.setenv(
+        "MIRROR_DESTINATIONS",
+        '[{"label": "env-gh", "type": "github", "owner": "o", "token": "t"}]',
+    )
+    dests = webui.get_destinations()
+    env_dest = next(d for d in dests if d["label"] == "env-gh")
+    assert env_dest["source"] == "env"
+    rv = client.get("/destinations")
+    assert b"env-gh" in rv.data
+    rv = client.post(
+        "/destinations/env-gh/delete",
+        data={"csrf_token": _login(client)},
+        follow_redirects=True,
+    )
+    assert b"Only UI-managed" in rv.data
+    # build_cfg picks env destinations up for run_push
+    cfg = webui.build_cfg()
+    assert any(d["label"] == "env-gh" for d in cfg["destinations"])
+
+
+def test_destinations_test_button(client, monkeypatch):
+    _login(client)
+    _add_dest(client, label="t1")
+    monkeypatch.setattr(em, "test_destination", lambda d: (True, "connected as octo"))
+    rv = _csrf_post(client, "/destinations/t1/test", {})
+    assert rv.status_code == 302
+    rv = client.get("/destinations")
+    assert b"connected as octo" in rv.data
+    webui.delete_destination("t1")
+
+
+def test_record_runs_stores_dest(client):
+    _login(client)
+    webui.record_runs(
+        "push",
+        "2026-10-04 00:00:00",
+        [
+            {"name": "a", "status": "success", "dest": "primary", "duration": 1.2, "error": ""},
+            {"name": "a", "status": "skipped", "dest": "backup", "duration": 0.5, "error": ""},
+        ],
+    )
+    rows = webui.recent_runs(5)
+    dests = {r["dest"] for r in rows if r["repo"] == "a"}
+    assert dests == {"primary", "backup"}

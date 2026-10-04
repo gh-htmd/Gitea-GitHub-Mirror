@@ -142,10 +142,16 @@ def format_summary(mode: str, results: List[Dict[str, Any]]) -> tuple:
     """Build a (subject, body) summary for a finished push/pull run."""
     counts = {"success": 0, "skipped": 0, "failed": 0}
     failed_lines = []
+    per_dest: Dict[str, Dict[str, int]] = {}
     for r in results:
-        counts[r.get("status", "failed")] = counts.get(r.get("status"), 0) + 1
-        if r.get("status") == "failed":
-            failed_lines.append(f"FAIL {r.get('name', '?')}: {r.get('error', '')}")
+        status = r.get("status", "failed")
+        counts[status] = counts.get(status, 0) + 1
+        dest = r.get("dest") or ""
+        d = per_dest.setdefault(dest, {"success": 0, "skipped": 0, "failed": 0})
+        d[status] = d.get(status, 0) + 1
+        if status == "failed":
+            where = f"{dest}/" if dest else ""
+            failed_lines.append(f"FAIL {where}{r.get('name', '?')}: {r.get('error', '')}")
     direction = "Gitea -> GitHub (encrypted)" if mode == "push" else "GitHub -> Gitea (decrypted)"
     subject = (
         f"Encrypted mirror {mode}: {counts['success']} ok, "
@@ -156,6 +162,15 @@ def format_summary(mode: str, results: List[Dict[str, Any]]) -> tuple:
         f"Success: {counts['success']}  Skipped: {counts['skipped']}  "
         f"Failed: {counts['failed']}"
     )
+    named_dests = [d for d in per_dest if d]
+    if len(named_dests) > 1:
+        lines.append("")
+        lines.append("Destinations:")
+        for dest in sorted(named_dests):
+            d = per_dest[dest]
+            lines.append(
+                f"  {dest}: {d['success']} ok, {d['skipped']} skipped, {d['failed']} failed"
+            )
     if failed_lines:
         lines += ["", "Failures:"] + failed_lines
     return subject, "\n".join(lines)

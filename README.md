@@ -60,8 +60,9 @@ Once configured, Gitea will **automatically sync** from GitHub on a schedule (de
 | **Web UI** | `webui.py`: password-gated dashboard (Docker) — sync stats, per-repo key management, env-based config, one-click push/pull, history, built-in scheduler |
 | **Notifications** | Telegram / ntfy / email alerts on sync failures (or every run); test button in the UI; works from the CLI too |
 | **Storage Stats** | Encrypted bundle sizes recorded per push; dashboard shows totals, per-repo breakdown and growth chart |
+| **Multi-destination** | One encrypted push fans out to extra destinations (2nd GitHub account, Codeberg/Gitea); per-dest change detection, UI-managed with test button, per-dest history and notifications |
 
-> **💡 v2.8.0 Highlights:** ⚙️ **Every env var configurable in the UI** — new Encrypted-sync and Classic-mirror sections; UI-saved values take effect immediately with no restart.
+> **💡 v2.9.0 Highlights:** 🌍 **Multi-destination mirrors** — push each encrypted bundle to a second GitHub account and/or Codeberg in the same run. Bundle built once, fanned out everywhere. Manage destinations in the new UI page with a token test button; history and notifications break down per destination.
 
 ---
 
@@ -316,6 +317,7 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 
 # Useful flags: --only repo1,repo2  --dry-run  --workers 5
 #               --all-gitea (push: include Gitea org repos, default is GITEA_USER only)
+#               --dest label1,label2 (push: only these destinations; default: all enabled)
 ```
 
 **Notes & limitations**
@@ -329,6 +331,27 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 
 ---
 
+### Multi-destination mirrors
+
+One encrypted push can fan out to **several destinations** — e.g. your main GitHub account **plus** a second GitHub account and Codeberg. The bundle is encrypted **once** and the identical bytes go everywhere, so there is no extra CPU cost per destination.
+
+- Each destination keeps its own fingerprint marker, so change detection is per-destination: a newly added destination is **backfilled** on the next push while unchanged ones are skipped.
+- Supported types: `github` (second account / org) and `gitea` (any Gitea server, incl. Codeberg). Repos are auto-created as private by default.
+- Manage them in the web UI under **Destinations**: add/edit, enable/disable, delete, and a **test** button that verifies the token without changing anything. The dashboard shows all destinations; history and notifications break results down per destination.
+- CLI: destinations come from the `MIRROR_DESTINATIONS` env var (JSON array) — the UI reads the same var, so both paths agree. `python3 encrypted_mirror.py push --dest backup-gh` pushes only to that destination.
+
+```bash
+# MIRROR_DESTINATIONS example (or add them in the web UI instead)
+MIRROR_DESTINATIONS='[
+  {"label": "backup-gh", "type": "github", "owner": "my-backup-acct", "token": "ghp_...", "private": true},
+  {"label": "codeberg", "type": "gitea", "url": "https://codeberg.org", "owner": "myuser", "token": "...", "private": true}
+]'
+```
+
+**Notes:** pull (decrypt → Gitea) always restores from the **primary** GitHub destination. For `gitea`-type destinations the token's own user owns the created repos. Tokens are stored in the UI database (never displayed back) and redacted from logs.
+
+---
+
 ## Web UI (Docker)
 
 `webui.py` is a password-gated web interface for the encrypted mirror, designed to run as a Docker container:
@@ -336,7 +359,8 @@ python3 encrypted_mirror.py pull --only my-repo --yes
 - **Dashboard** — simple stats: Gitea repo count, encrypted mirrors on GitHub, last sync (direction/status/time), 24h results, and recent runs.
 - **Repositories** — per-repo encryption keys: give any repo its **own key**, or leave it on the **shared** `ENCRYPTION_PASSPHRASE`. Keys are never displayed back, only "custom key / shared key" badges. Each row shows last push/pull status and has push/pull buttons; "push all / pull all" included.
 - **Config** — every setting is seeded from environment variables and editable in the UI: mirror connection, encrypted-sync tuning (keys file, timeouts, log level), the classic `mirror.py` options, notifications, and scheduling. Values set via real env vars show as read-only; the rest persist to the data volume's `.env` file and take effect immediately (no restart needed).
-- **History** — full log of past sync runs per repo.
+- **History** — full log of past sync runs per repo (with destination column for multi-dest pushes).
+- **Destinations** — extra push targets (2nd GitHub account, Codeberg/Gitea) with enable/disable, token test, and per-destination last-push status.
 - **Scheduler** — optional built-in auto-sync (`AUTO_SYNC=true`, `SYNC_INTERVAL_HOURS`, `SYNC_DIRECTION=push|pull|both`).
 
 ```bash

@@ -98,7 +98,9 @@ NOTIFY_FIELDS: List[Tuple[str, str, str, bool]] = [
 ]
 
 NOTIFY_FIELD_HINTS = {
-    "ENCRYPTION_PASSPHRASE": "The shared key used for repos without a custom per-repo key (see Repositories).",
+    "ENCRYPTION_PASSPHRASE": (
+        "The shared key used for repos without a custom per-repo key (see Repositories)."
+    ),
     "SYNC_DIRECTION": "Which direction the scheduled sync runs.",
     "NOTIFY_MODE": "When to send notifications: on failures only, after every run, or never.",
     "NOTIFY_TELEGRAM_BOT_TOKEN": "Create a bot with @BotFather; paste its token here.",
@@ -273,7 +275,7 @@ def build_cfg() -> Dict[str, Any]:
             repo_keys = {**file_keys, **repo_keys}  # UI keys take precedence
         except Exception as e:
             log.warning("Could not load KEYS_FILE %s: %s", keys_file, e)
-    return {
+    cfg = {
         "gitea_url": effective_value("GITEA_URL").rstrip("/"),
         "gitea_token": effective_value("GITEA_TOKEN"),
         "gitea_user": effective_value("GITEA_USER"),
@@ -285,6 +287,9 @@ def build_cfg() -> Dict[str, Any]:
         "skip_repos": {r.strip() for r in effective_value("SKIP_REPOS").split(",") if r.strip()},
         "repo_keys": repo_keys,
     }
+    cfg["destinations"] = em.load_extra_destinations()
+    cfg["notify_settings"] = notify_settings()
+    return cfg
 
 
 def cfg_problems(cfg: Dict[str, Any]) -> List[str]:
@@ -333,6 +338,18 @@ def _db_conn() -> sqlite3.Connection:
         "repo TEXT NOT NULL, recorded_at TEXT NOT NULL, bytes INTEGER NOT NULL)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sizes_repo ON bundle_sizes(repo, recorded_at)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS destinations("
+        "label TEXT PRIMARY KEY, type TEXT NOT NULL DEFAULT 'github', "
+        "url TEXT NOT NULL DEFAULT 'https://github.com', owner TEXT NOT NULL, "
+        "username TEXT NOT NULL, token TEXT NOT NULL, "
+        "private INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, "
+        "updated_at TEXT NOT NULL)"
+    )
+    # Migration: sync_runs gained a dest column in v2.9.0.
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(sync_runs)").fetchall()]
+    if "dest" not in cols:
+        conn.execute("ALTER TABLE sync_runs ADD COLUMN dest TEXT NOT NULL DEFAULT ''")
     conn.commit()
     return conn
 
@@ -373,6 +390,142 @@ def clear_repo_key(repo: str) -> None:
             conn.close()
 
 
+def get_destinations() -> List[Dict[str, Any]]:
+    """All extra push destinations: UI-managed plus MIRROR_DESTINATIONS env (read-only)."""
+    dests: List[Dict[str, Any]] = []
+    seen = set()
+    # Env-provided first (read-only in the UI).
+    for d in em.load_extra_destinations():
+        if d.get("source") != "env":
+            continue
+        dests.append({**d, "source": "env"})
+        seen.add(d["label"])
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            rows = conn.execute(
+                "SELECT label, type, url, owner, username, token, private, enabled"
+                " FROM destinations ORDER BY label"
+            ).fetchall()
+        finally:
+            conn.close()
+    for r in rows:
+        if r["label"] in seen or r["label"] == "primary":
+            continue
+        dests.append(
+            {
+                "label": r["label"],
+                "type": r["type"],
+                "url": r["url"],
+                "owner": r["owner"],
+                "username": r["username"],
+                "token": r["token"],
+                "private": bool(r["private"]),
+                "enabled": bool(r["enabled"]),
+                "source": "ui",
+            }
+        )
+    return dests
+
+
+def get_destination(label: str) -> Optional[Dict[str, Any]]:
+    for d in get_destinations():
+        if d["label"] == label:
+            return d
+    return None
+
+
+def save_destination(
+    label: str,
+    dtype: str,
+    url: str,
+    owner: str,
+    username: str,
+    token: str,
+    private: bool,
+    enabled: bool,
+) -> None:
+    """Insert or update a UI-managed destination. Raises ValueError if invalid."""
+    if label.strip() == "primary":
+        raise ValueError("destination label may not be 'primary' (reserved)")
+    dest = em._normalize_dest(
+        {
+            "label": label,
+            "type": dtype,
+            "url": url,
+            "owner": owner,
+            "username": username,
+            "token": token,
+            "private": private,
+            "enabled": enabled,
+        }
+    )
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute(
+                "INSERT INTO destinations(label, type, url, owner, username, token,"
+                " private, enabled, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(label) DO UPDATE SET type=excluded.type, url=excluded.url,"
+                " owner=excluded.owner, username=excluded.username, token=excluded.token,"
+                " private=excluded.private, enabled=excluded.enabled,"
+                " updated_at=excluded.updated_at",
+                (
+                    dest["label"],
+                    dest["type"],
+                    dest["url"],
+                    dest["owner"],
+                    dest["username"],
+                    dest["token"],
+                    int(dest["private"]),
+                    int(dest["enabled"]),
+                    _utcnow(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def delete_destination(label: str) -> None:
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute("DELETE FROM destinations WHERE label = ?", (label,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def set_destination_enabled(label: str, enabled: bool) -> None:
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            conn.execute(
+                "UPDATE destinations SET enabled = ?, updated_at = ? WHERE label = ?",
+                (int(enabled), _utcnow(), label),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def last_push_per_dest() -> Dict[str, sqlite3.Row]:
+    """Latest push result per destination label (for the destinations page)."""
+    with _db_lock:
+        conn = _db_conn()
+        try:
+            rows = conn.execute(
+                "SELECT dest, status, finished_at FROM sync_runs "
+                "WHERE direction = 'push' AND id IN "
+                "(SELECT MAX(id) FROM sync_runs WHERE direction = 'push' GROUP BY dest)"
+            ).fetchall()
+        finally:
+            conn.close()
+    return {r["dest"] or "primary": r for r in rows}
+
+
 def record_runs(direction: str, started_at: str, results: List[Dict[str, Any]]) -> None:
     finished = _utcnow()
     with _db_lock:
@@ -380,11 +533,12 @@ def record_runs(direction: str, started_at: str, results: List[Dict[str, Any]]) 
         try:
             for r in results:
                 conn.execute(
-                    "INSERT INTO sync_runs(repo, direction, status, started_at, finished_at,"
-                    " duration_s, detail) VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO sync_runs(repo, direction, dest, status, started_at,"
+                    " finished_at, duration_s, detail) VALUES (?,?,?,?,?,?,?,?)",
                     (
                         r.get("name", "?"),
                         direction,
+                        r.get("dest", "") or "",
                         r.get("status", "failed"),
                         started_at,
                         finished,
@@ -416,7 +570,7 @@ def last_run_per_repo() -> Dict[Tuple[str, str], sqlite3.Row]:
         conn = _db_conn()
         try:
             rows = conn.execute(
-                "SELECT repo, direction, status, started_at, detail FROM sync_runs "
+                "SELECT repo, direction, dest, status, started_at, detail FROM sync_runs "
                 "WHERE id IN (SELECT MAX(id) FROM sync_runs GROUP BY repo, direction)"
             ).fetchall()
         finally:
@@ -429,8 +583,8 @@ def recent_runs(limit: int = 20) -> List[sqlite3.Row]:
         conn = _db_conn()
         try:
             rows = conn.execute(
-                "SELECT repo, direction, status, started_at, duration_s, detail FROM sync_runs "
-                "ORDER BY id DESC LIMIT ?",
+                "SELECT repo, direction, dest, status, started_at, duration_s, detail"
+                " FROM sync_runs ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         finally:
@@ -757,6 +911,7 @@ def create_app() -> Flask:
         sizes = storage_latest()
         total_bytes = sum(r["bytes"] for r in sizes)
         history = storage_daily_totals(90)
+        dests = get_destinations()
         return render_template(
             "dashboard.html",
             stats=stats,
@@ -767,6 +922,8 @@ def create_app() -> Flask:
             interval=effective_value("SYNC_INTERVAL_HOURS") or "12",
             direction=effective_value("SYNC_DIRECTION") or "push",
             running={"push": is_running("push"), "pull": is_running("pull")},
+            dests=dests,
+            enabled_dests=[d for d in dests if d["enabled"]],
             storage_total=human_bytes(total_bytes),
             storage_rows=[
                 {
@@ -859,6 +1016,94 @@ def create_app() -> Flask:
     @login_required
     def runs():
         return render_template("runs.html", runs=recent_runs(100))
+
+    @app.get("/destinations")
+    @login_required
+    def destinations():
+        dests = get_destinations()
+        last = last_push_per_dest()
+        return render_template(
+            "destinations.html",
+            dests=dests,
+            last=last,
+            primary_owner=effective_value("GITHUB_USER"),
+            primary_private=_as_bool(effective_value("GITHUB_MIRROR_PRIVATE") or "true"),
+        )
+
+    @app.post("/destinations")
+    @login_required
+    def destinations_add():
+        if not check_csrf():
+            flash("Invalid form token. Please try again.", "error")
+            return redirect(url_for("destinations"))
+        label = request.form.get("label", "").strip()
+        if not label or label == "primary":
+            flash("Label is required and may not be 'primary'.", "error")
+            return redirect(url_for("destinations"))
+        if get_destination(label):
+            flash(f"A destination named '{label}' already exists.", "error")
+            return redirect(url_for("destinations"))
+        dtype = request.form.get("type", "github")
+        url = request.form.get("url", "").strip() or (
+            "https://github.com" if dtype == "github" else "https://codeberg.org"
+        )
+        try:
+            save_destination(
+                label=label,
+                dtype=dtype,
+                url=url,
+                owner=request.form.get("owner", "").strip(),
+                username=request.form.get("username", "").strip(),
+                token=request.form.get("token", ""),
+                private=request.form.get("private", "") == "on",
+                enabled=True,
+            )
+            flash(f"Destination '{label}' added.", "ok")
+        except ValueError as e:
+            flash(str(e), "error")
+        return redirect(url_for("destinations"))
+
+    @app.post("/destinations/<label>/toggle")
+    @login_required
+    def destinations_toggle(label):
+        if not check_csrf():
+            flash("Invalid form token. Please try again.", "error")
+            return redirect(url_for("destinations"))
+        dest = get_destination(label)
+        if not dest or dest["source"] != "ui":
+            flash("Only UI-managed destinations can be toggled.", "error")
+            return redirect(url_for("destinations"))
+        set_destination_enabled(label, not dest["enabled"])
+        flash(f"Destination '{label}' {'enabled' if not dest['enabled'] else 'disabled'}.", "ok")
+        return redirect(url_for("destinations"))
+
+    @app.post("/destinations/<label>/delete")
+    @login_required
+    def destinations_delete(label):
+        if not check_csrf():
+            flash("Invalid form token. Please try again.", "error")
+            return redirect(url_for("destinations"))
+        dest = get_destination(label)
+        if not dest or dest["source"] != "ui":
+            flash("Only UI-managed destinations can be deleted.", "error")
+            return redirect(url_for("destinations"))
+        delete_destination(label)
+        flash(f"Destination '{label}' deleted.", "ok")
+        return redirect(url_for("destinations"))
+
+    @app.post("/destinations/<label>/test")
+    @login_required
+    def destinations_test(label):
+        if not check_csrf():
+            flash("Invalid form token. Please try again.", "error")
+            return redirect(url_for("destinations"))
+        dest = get_destination(label)
+        if not dest:
+            flash(f"Unknown destination '{label}'.", "error")
+            return redirect(url_for("destinations"))
+        ok, msg = em.test_destination(dest)
+        flash(f"{label}: {msg}", "ok" if ok else "error")
+        return redirect(url_for("destinations"))
 
     @app.get("/config")
     @login_required

@@ -56,6 +56,7 @@ import logging
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -80,7 +81,7 @@ except ImportError:  # pragma: no cover - standalone fallback
     _MIRROR_AVAILABLE = False
     mirror = None  # type: ignore
 
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOGS_DIR = SCRIPT_DIR / "logs"
 ENV_FILE = SCRIPT_DIR / ".env"
@@ -427,11 +428,9 @@ def _verify_bundle_bytes(bundle_bytes: bytes, work_dir: Path, secrets: Tuple[str
 # ---------------------------------------------------------------------------
 # PUSH: Gitea -> GitHub (encrypted)
 # ---------------------------------------------------------------------------
-def push_encrypted_repo(
+def build_encrypted_payload(
     repo_name: str,
     gitea_clone_url: str,
-    github_clone_url: str,
-    github_api: Optional[Dict[str, Any]],
     passphrase: str,
     work_root: Path,
     dry_run: bool,
@@ -439,9 +438,14 @@ def push_encrypted_repo(
     logger: logging.Logger,
     secrets: Tuple[str, ...],
 ) -> Dict[str, Any]:
-    """Mirror one Gitea repo to GitHub, encrypted. Returns a result dict."""
+    """Build the encrypted bundle for one repo (clone Gitea, bundle, encrypt).
+
+    The expensive per-repo work happens exactly once; the resulting payload can
+    then be pushed to any number of destinations. On success the result dict
+    carries a 'payload' key with encrypted/sha256/ref_count/bundle_name.
+    """
     start = time.time()
-    tmp = Path(tempfile.mkdtemp(prefix=f"ggm-push-{repo_name}-", dir=str(work_root)))
+    tmp = Path(tempfile.mkdtemp(prefix=f"ggm-build-{repo_name}-", dir=str(work_root)))
     try:
         # 1. Mirror-clone from Gitea.
         src_git = tmp / "src.git"
@@ -488,56 +492,137 @@ def push_encrypted_repo(
             return _result(
                 repo_name, start, "success", f"dry-run: would push {len(encrypted)} encrypted bytes"
             )
+        return _result(
+            repo_name,
+            start,
+            "success",
+            f"built {len(encrypted)} encrypted bytes ({ref_count} refs)",
+            extra={
+                "payload": {
+                    "encrypted": encrypted,
+                    "sha256": sha256,
+                    "ref_count": ref_count,
+                    "bundle_name": bundle_name,
+                }
+            },
+        )
+    except GitError as e:
+        return _result(repo_name, start, "failed", f"git error: {e}")
+    except Exception as e:  # never let a worker thread die silently
+        return _result(repo_name, start, "failed", f"unexpected: {e}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
-        # 5. Ensure the GitHub repo exists (API step skipped in local/test mode).
-        if github_api is not None:
+
+def push_payload_to_dest(
+    repo_name: str,
+    payload: Dict[str, Any],
+    dest: Dict[str, Any],
+    work_root: Path,
+    dry_run: bool,
+    logger: logging.Logger,
+    secrets: Tuple[str, ...],
+) -> Dict[str, Any]:
+    """Push an already-built encrypted payload to one destination.
+
+    dest keys: label, type ('github'|'gitea'), url, owner, username, token,
+    private, primary (bool), skip_api (bool, test mode), clone_url (override).
+    Each destination keeps its own marker, so change detection is per-dest.
+    """
+    start = time.time()
+    label = dest.get("label", "primary")
+    tmp = Path(tempfile.mkdtemp(prefix=f"ggm-dest-{repo_name}-", dir=str(work_root)))
+    try:
+        encrypted = payload["encrypted"]
+        sha256 = payload["sha256"]
+        ref_count = payload["ref_count"]
+        bundle_name = payload["bundle_name"]
+
+        if dry_run:
+            return _result(
+                repo_name,
+                start,
+                "success",
+                f"dry-run: would push {len(encrypted)} encrypted bytes to {label}",
+                extra={"dest": label},
+            )
+
+        # 1. Ensure the destination repo exists (API step skipped in test mode).
+        if not dest.get("skip_api"):
             try:
-                ensure_github_repo(
-                    github_api["owner"],
-                    github_api["name"],
-                    github_api["token"],
-                    github_api["private"],
-                    logger,
-                )
+                if dest.get("type") == "gitea":
+                    ensure_gitea_repo(
+                        dest["url"],
+                        dest["owner"],
+                        repo_name,
+                        dest["token"],
+                        dest.get("private", True),
+                        logger,
+                    )
+                else:
+                    ensure_github_repo(
+                        dest["owner"],
+                        repo_name,
+                        dest["token"],
+                        dest.get("private", True),
+                        logger,
+                    )
             except ApiError as e:
-                return _result(repo_name, start, "failed", str(e))
+                return _result(repo_name, start, "failed", str(e), extra={"dest": label})
 
-        # 6. Clone the GitHub mirror repo (shallow — we only need the tip).
-        gh_dir = tmp / "gh"
+        # 2. Clone the destination mirror repo (shallow — we only need the tip).
+        clone_url = dest.get("clone_url") or https_clone_url(
+            dest["url"], dest["username"], dest["token"], dest["owner"], repo_name
+        )
+        dest_dir = tmp / "dest"
         try:
             run_git(
-                ["clone", "--depth", "1", "--quiet", github_clone_url, str(gh_dir)],
+                ["clone", "--depth", "1", "--quiet", clone_url, str(dest_dir)],
                 secrets=secrets,
             )
         except GitError as e:
-            return _result(repo_name, start, "failed", f"GitHub clone failed: {e}")
+            return _result(
+                repo_name, start, "failed", f"{label}: clone failed: {e}", extra={"dest": label}
+            )
 
-        # 7. Skip when the encrypted bundle is unchanged.
-        marker = _read_marker(gh_dir)
+        # 3. Skip when this destination already has the same bundle.
+        marker = _read_marker(dest_dir)
         if (
             marker
             and marker.get("format") == crypto.FORMAT_NAME
             and crypto.constant_time_compare(marker.get("sha256", ""), sha256)
-            and (gh_dir / bundle_name).is_file()
+            and (dest_dir / bundle_name).is_file()
         ):
-            return _result(repo_name, start, "skipped", "unchanged (bundle fingerprint match)")
+            return _result(
+                repo_name,
+                start,
+                "skipped",
+                "unchanged (bundle fingerprint match)",
+                extra={"dest": label},
+            )
 
-        # 8. Write bundle + marker + README, commit, push.
-        (gh_dir / bundle_name).write_bytes(encrypted)
-        (gh_dir / MARKER_FILE).write_text(
+        # 4. Write bundle + marker + README, commit, push.
+        (dest_dir / bundle_name).write_bytes(encrypted)
+        (dest_dir / MARKER_FILE).write_text(
             json.dumps(_marker_dict(bundle_name, sha256), indent=2) + "\n", encoding="utf-8"
         )
-        (gh_dir / README_FILE).write_text(_readme_text(bundle_name), encoding="utf-8")
+        (dest_dir / README_FILE).write_text(_readme_text(bundle_name), encoding="utf-8")
 
-        run_git(["-C", str(gh_dir), "add", "-A"], secrets=secrets)
-        status_out = run_git(["-C", str(gh_dir), "status", "--porcelain"], secrets=secrets)
+        run_git(["-C", str(dest_dir), "add", "-A"], secrets=secrets)
+        status_out = run_git(["-C", str(dest_dir), "status", "--porcelain"], secrets=secrets)
         if not status_out.strip():
-            return _result(repo_name, start, "skipped", "unchanged (nothing to commit)")
+            return _result(
+                repo_name,
+                start,
+                "skipped",
+                "unchanged (nothing to commit)",
+                extra={"dest": label},
+            )
 
         run_git(
             [
                 "-C",
-                str(gh_dir),
+                str(dest_dir),
                 "-c",
                 f"user.name={GIT_USER_NAME}",
                 "-c",
@@ -550,33 +635,76 @@ def push_encrypted_repo(
             secrets=secrets,
         )
         branch = run_git(
-            ["-C", str(gh_dir), "rev-parse", "--abbrev-ref", "HEAD"], secrets=secrets
+            ["-C", str(dest_dir), "rev-parse", "--abbrev-ref", "HEAD"], secrets=secrets
         ).strip()
         if branch == "HEAD":  # unborn HEAD (brand-new empty repo)
             branch = "main"
-            run_git(["-C", str(gh_dir), "checkout", "--quiet", "-B", branch], secrets=secrets)
-            run_git(["-C", str(gh_dir), "push", "--quiet", "-u", "origin", branch], secrets=secrets)
+            run_git(["-C", str(dest_dir), "checkout", "--quiet", "-B", branch], secrets=secrets)
+            run_git(
+                ["-C", str(dest_dir), "push", "--quiet", "-u", "origin", branch],
+                secrets=secrets,
+            )
         else:
-            run_git(["-C", str(gh_dir), "push", "--quiet", "origin", branch], secrets=secrets)
+            run_git(["-C", str(dest_dir), "push", "--quiet", "origin", branch], secrets=secrets)
 
+        extra: Dict[str, Any] = {"dest": label}
+        if dest.get("primary"):
+            extra["bytes"] = len(encrypted)  # storage stats recorded once per repo
         return _result(
             repo_name,
             start,
             "success",
-            f"pushed {len(encrypted)} encrypted bytes ({ref_count} refs)",
-            extra={"bytes": len(encrypted)},
+            f"[{label}] pushed {len(encrypted)} encrypted bytes ({ref_count} refs)",
+            extra=extra,
         )
     except GitError as e:
-        return _result(repo_name, start, "failed", f"git error: {e}")
+        return _result(repo_name, start, "failed", f"git error: {e}", extra={"dest": label})
     except Exception as e:  # never let a worker thread die silently
-        return _result(repo_name, start, "failed", f"unexpected: {e}")
+        return _result(repo_name, start, "failed", f"unexpected: {e}", extra={"dest": label})
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# ---------------------------------------------------------------------------
-# PULL: GitHub -> Gitea (decrypt)
-# ---------------------------------------------------------------------------
+def push_encrypted_repo(
+    repo_name: str,
+    gitea_clone_url: str,
+    github_clone_url: str,
+    github_api: Optional[Dict[str, Any]],
+    passphrase: str,
+    work_root: Path,
+    dry_run: bool,
+    verify: bool,
+    logger: logging.Logger,
+    secrets: Tuple[str, ...],
+) -> Dict[str, Any]:
+    """Mirror one Gitea repo to one GitHub destination, encrypted.
+
+    Compatibility wrapper: builds the payload once, then pushes it to the
+    single destination described by github_clone_url/github_api.
+    """
+    build = build_encrypted_payload(
+        repo_name, gitea_clone_url, passphrase, work_root, dry_run, verify, logger, secrets
+    )
+    if build["status"] != "success" or "payload" not in build:
+        return build
+    api = github_api or {}
+    dest = {
+        "label": "primary",
+        "type": "github",
+        "url": "https://github.com",
+        "owner": api.get("owner", ""),
+        "username": api.get("owner", ""),
+        "token": api.get("token", ""),
+        "private": api.get("private", True),
+        "primary": True,
+        "skip_api": github_api is None,
+        "clone_url": github_clone_url,
+    }
+    return push_payload_to_dest(
+        repo_name, build["payload"], dest, work_root, dry_run, logger, secrets
+    )
+
+
 def pull_decrypted_repo(
     repo_name: str,
     github_clone_url: str,
@@ -869,8 +997,154 @@ def _restore_sigint_handler(original) -> None:
         _restore_sigint_handler(original)
 
 
+# ---------------------------------------------------------------------------
+# Multi-destination support
+# ---------------------------------------------------------------------------
+def _normalize_dest(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill defaults for an extra destination dict. Raises ValueError if invalid."""
+    d = dict(raw)
+    label = str(d.get("label", "")).strip()
+    if not label:
+        raise ValueError("destination needs a 'label'")
+    dtype = str(d.get("type", "github")).strip().lower()
+    if dtype not in ("github", "gitea"):
+        raise ValueError(f"destination '{label}': type must be 'github' or 'gitea', got '{dtype}'")
+    url = str(d.get("url", "")).strip().rstrip("/") or (
+        "https://github.com" if dtype == "github" else ""
+    )
+    if not url:
+        raise ValueError(f"destination '{label}': 'url' is required for type 'gitea'")
+    owner = str(d.get("owner", "")).strip()
+    token = str(d.get("token", "")).strip()
+    if not owner or not token:
+        raise ValueError(f"destination '{label}': 'owner' and 'token' are required")
+    return {
+        "label": label,
+        "type": dtype,
+        "url": url,
+        "owner": owner,
+        "username": str(d.get("username", "")).strip() or owner,
+        "token": token,
+        "private": bool(d.get("private", True)),
+        "enabled": bool(d.get("enabled", True)),
+        "primary": False,
+    }
+
+
+def load_extra_destinations() -> List[Dict[str, Any]]:
+    """Extra push destinations from MIRROR_DESTINATIONS (JSON) and the UI database."""
+    dests: List[Dict[str, Any]] = []
+    seen = set()
+
+    def _add(raw: Dict[str, Any], source: str) -> None:
+        try:
+            d = _normalize_dest(raw)
+        except ValueError as e:
+            logging.getLogger("encmirror").warning("Ignoring destination (%s): %s", source, e)
+            return
+        if d["label"] in seen or d["label"] == "primary":
+            return
+        seen.add(d["label"])
+        d["source"] = source
+        dests.append(d)
+
+    raw = os.environ.get("MIRROR_DESTINATIONS", "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+            for item in data if isinstance(data, list) else []:
+                if isinstance(item, dict):
+                    _add(item, "env")
+        except (json.JSONDecodeError, TypeError) as e:
+            logging.getLogger("encmirror").warning("MIRROR_DESTINATIONS is not valid JSON: %s", e)
+
+    # Destinations managed in the web UI (same SQLite file the UI uses).
+    try:
+        db_path = (
+            Path(os.environ.get("WEBUI_DATA_DIR", str(Path(__file__).parent / "data"))) / "ui.db"
+        )
+        if db_path.is_file():
+            conn = sqlite3.connect(str(db_path))
+            try:
+                rows = conn.execute(
+                    "SELECT label, type, url, owner, username, token, private, enabled"
+                    " FROM destinations"
+                ).fetchall()
+            finally:
+                conn.close()
+            for label, dtype, url, owner, username, token, private, enabled in rows:
+                _add(
+                    {
+                        "label": label,
+                        "type": dtype,
+                        "url": url,
+                        "owner": owner,
+                        "username": username,
+                        "token": token,
+                        "private": bool(private),
+                        "enabled": bool(enabled),
+                    },
+                    "ui",
+                )
+    except Exception as e:  # never break a sync over the destinations list
+        logging.getLogger("encmirror").warning("Could not read destinations database: %s", e)
+    return dests
+
+
+def test_destination(dest: Dict[str, Any]) -> Tuple[bool, str]:
+    """Check a destination's credentials via API without changing anything."""
+    try:
+        if dest.get("type") == "gitea":
+            status, body = _api_request(f"{dest['url'].rstrip('/')}/api/v1/user", dest["token"])
+        else:
+            status, body = _api_request("https://api.github.com/user", dest["token"])
+        if status == 200 and isinstance(body, dict):
+            return True, f"connected as {body.get('login', '?')}"
+        return False, f"token rejected (HTTP {status})"
+    except Exception as e:
+        return False, f"connection failed: {e}"
+
+
+def _push_destinations(
+    cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logger
+) -> List[Dict[str, Any]]:
+    """Primary GitHub destination plus enabled extras, honoring --dest filter."""
+    dests = [
+        {
+            "label": "primary",
+            "type": "github",
+            "url": "https://github.com",
+            "owner": cfg["github_user"],
+            "username": cfg["github_user"],
+            "token": cfg["github_token"],
+            "private": cfg["github_private"],
+            "enabled": True,
+            "primary": True,
+            "source": "config",
+        }
+    ]
+    for d in cfg.get("destinations", []):
+        if d.get("enabled", True):
+            dests.append(d)
+    only = getattr(args, "dest", None)
+    if only:
+        if isinstance(only, str):
+            only = [o.strip() for o in only.split(",") if o.strip()]
+        dests = [d for d in dests if d["label"] in only]
+        missing = set(only) - {d["label"] for d in dests}
+        for m in missing:
+            logger.warning(f"Unknown destination '{m}' (available: {[d['label'] for d in dests]})")
+    return dests
+
+
 def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logger) -> int:
-    secrets = (cfg["gitea_token"], cfg["github_token"])
+    dests = _push_destinations(cfg, args, logger)
+    if not dests:
+        logger.info("No push destinations (all disabled or filtered out).")
+        return 0
+    secrets = tuple(
+        [cfg["gitea_token"], cfg["github_token"]] + [d["token"] for d in dests if d.get("token")]
+    )
     logger.info("Fetching Gitea repository list...")
     gitea_repos = mirror.fetch_gitea_repos(cfg["gitea_url"], cfg["gitea_token"], logger)
     # Default: mirror repos owned by GITEA_USER; --all-gitea includes org repos too.
@@ -884,12 +1158,15 @@ def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
         logger.info("Nothing to push (no matching Gitea repos).")
         return 0
 
-    logger.info(f"Encrypted push: {len(names)} repo(s) Gitea -> GitHub")
+    dest_labels = ", ".join(d["label"] for d in dests)
+    logger.info(f"Encrypted push: {len(names)} repo(s) Gitea -> {dest_labels}")
     for n in names:
         logger.info(f"  - {n}")
     if not args.yes and not args.dry_run:
         if (
-            input(f"\nEncrypt and push {len(names)} repo(s) to GitHub? (y/N): ").strip().lower()
+            input(f"\nEncrypt and push {len(names)} repo(s) to {dest_labels}? (y/N): ")
+            .strip()
+            .lower()
             != "y"
         ):
             logger.info("Cancelled.")
@@ -897,65 +1174,104 @@ def run_push(cfg: Dict[str, Any], args: argparse.Namespace, logger: logging.Logg
 
     work_root = Path(tempfile.mkdtemp(prefix="ggm-work-"))
     results: List[Dict[str, Any]] = []
+    counter = [0]
     original = _install_sigint_handler(logger)
+
+    def _collect(res: Dict[str, Any], total: int) -> None:
+        results.append(res)
+        with _print_lock:
+            counter[0] += 1
+            _log_result(logger, counter[0], total, res)
+
     try:
+        # Phase 1: build each repo's encrypted payload exactly once.
+        payloads: Dict[str, Dict[str, Any]] = {}
+        build_total = len(names)
         with ThreadPoolExecutor(
-            max_workers=args.workers or cfg["max_workers"], thread_name_prefix="push"
+            max_workers=args.workers or cfg["max_workers"], thread_name_prefix="push-build"
         ) as pool:
             futures = {}
-            for idx, name in enumerate(names, 1):
+            for name in names:
                 if _shutdown_event.is_set():
                     break
                 passphrase = resolve_passphrase(cfg, name)
                 if not passphrase:
-                    results.append(
+                    _collect(
                         _result(
                             name,
                             time.time(),
                             "failed",
                             "No encryption key: set ENCRYPTION_PASSPHRASE or a per-repo key.",
-                        )
+                            extra={"dest": ""},
+                        ),
+                        build_total,
                     )
-                    _log_result(logger, idx, len(names), results[-1])
                     continue
                 gitea_clone = https_clone_url(
                     cfg["gitea_url"], cfg["gitea_user"], cfg["gitea_token"], cfg["gitea_user"], name
                 )
-                github_clone = https_clone_url(
-                    "https://github.com",
-                    cfg["github_user"],
-                    cfg["github_token"],
-                    cfg["github_user"],
-                    name,
-                )
-                fut = pool.submit(
-                    push_encrypted_repo,
-                    repo_name=name,
-                    gitea_clone_url=gitea_clone,
-                    github_clone_url=github_clone,
-                    github_api={
-                        "owner": cfg["github_user"],
-                        "name": name,
-                        "token": cfg["github_token"],
-                        "private": cfg["github_private"],
-                    },
-                    passphrase=passphrase,
-                    work_root=work_root,
-                    dry_run=args.dry_run,
-                    verify=not args.no_verify,
-                    logger=logger,
-                    secrets=secrets,
-                )
-                futures[fut] = (idx, name)
+                futures[
+                    pool.submit(
+                        build_encrypted_payload,
+                        repo_name=name,
+                        gitea_clone_url=gitea_clone,
+                        passphrase=passphrase,
+                        work_root=work_root,
+                        dry_run=args.dry_run,
+                        verify=not args.no_verify,
+                        logger=logger,
+                        secrets=secrets,
+                    )
+                ] = name
             for fut in as_completed(futures):
-                idx, name = futures[fut]
+                name = futures[fut]
                 try:
                     res = fut.result()
                 except Exception as e:  # pragma: no cover - defensive
                     res = _result(name, time.time(), "failed", f"worker crashed: {e}")
-                results.append(res)
-                with _print_lock:
-                    _log_result(logger, idx, len(names), res)
+                if res["status"] == "success" and "payload" in res:
+                    payloads[name] = res["payload"]
+                else:
+                    # Build failure, skip, or dry-run: one result, no destination.
+                    res.setdefault("dest", "")
+                    _collect(res, build_total)
+
+        # Phase 2: push each payload to every enabled destination.
+        if payloads and not args.dry_run:
+            push_total = len(payloads) * len(dests)
+            with ThreadPoolExecutor(
+                max_workers=args.workers or cfg["max_workers"], thread_name_prefix="push-dest"
+            ) as pool:
+                futures = {}
+                for name, payload in payloads.items():
+                    if _shutdown_event.is_set():
+                        break
+                    for dest in dests:
+                        futures[
+                            pool.submit(
+                                push_payload_to_dest,
+                                repo_name=name,
+                                payload=payload,
+                                dest=dest,
+                                work_root=work_root,
+                                dry_run=args.dry_run,
+                                logger=logger,
+                                secrets=secrets,
+                            )
+                        ] = (name, dest["label"])
+                for fut in as_completed(futures):
+                    name, label = futures[fut]
+                    try:
+                        res = fut.result()
+                    except Exception as e:  # pragma: no cover - defensive
+                        res = _result(
+                            name,
+                            time.time(),
+                            "failed",
+                            f"worker crashed: {e}",
+                            extra={"dest": label},
+                        )
+                    _collect(res, push_total)
     finally:
         _restore_sigint_handler(original)
         shutil.rmtree(work_root, ignore_errors=True)
@@ -1087,7 +1403,10 @@ def _maybe_notify(cfg: Dict[str, Any], mode: str, results: List[Dict[str, Any]])
 def _log_result(logger: logging.Logger, idx: int, total: int, res: Dict[str, Any]) -> None:
     status = res["status"]
     icon = {"success": "OK", "skipped": "SKIP", "failed": "FAIL"}.get(status, status)
-    logger.info(f"[{idx}/{total}] {res['name']} ... {icon} ({res['duration']:.1f}s) {res['error']}")
+    dest = f" [{res['dest']}]" if res.get("dest") else ""
+    logger.info(
+        f"[{idx}/{total}]{dest} {res['name']} ... {icon} ({res['duration']:.1f}s) {res['error']}"
+    )
 
 
 def _summarize(
@@ -1137,6 +1456,12 @@ def main() -> None:
         "--only", default=None, help="Comma-separated repo names to process (default: all)."
     )
     parser.add_argument(
+        "--dest",
+        default=None,
+        help="(push) comma-separated destination labels to push to "
+        "(default: all enabled). Use any label from the destinations list.",
+    )
+    parser.add_argument(
         "--all-gitea",
         action="store_true",
         help="(push) include Gitea org repos, not just GITEA_USER's.",
@@ -1175,6 +1500,7 @@ def main() -> None:
 
     cfg = _load_config(logger)
     cfg["notify_settings"] = notify.settings_from_env()
+    cfg["destinations"] = load_extra_destinations()
     if args.keys_file:
         try:
             cfg["repo_keys"] = load_keys_file(args.keys_file)

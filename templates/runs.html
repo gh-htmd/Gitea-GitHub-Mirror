@@ -5,12 +5,13 @@
 <div class="panel">
   {% if runs %}
   <table>
-    <tr><th>Time</th><th>Repo</th><th>Direction</th><th>Status</th><th>Duration</th><th>Detail</th></tr>
+    <tr><th>Time</th><th>Repo</th><th>Direction</th><th>Dest</th><th>Status</th><th>Duration</th><th>Detail</th></tr>
     {% for r in runs %}
     <tr>
       <td class="muted">{{ r["started_at"] }}</td>
       <td><code>{{ r["repo"] }}</code></td>
       <td>{{ r["direction"] }}</td>
+      <td class="muted">{{ r["dest"] or ("primary" if r["direction"] == "push" else "—") }}</td>
       <td><span class="pill {{ 'ok' if r['status']=='success' else ('skip' if r['status']=='skipped' else 'err') }}">{{ r["status"] }}</span></td>
       <td class="muted">{{ "%.1f"|format(r["duration_s"] or 0) }}s</td>
       <td class="muted">{{ r["detail"] or "" }}</td>

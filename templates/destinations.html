@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Destinations{% endblock %}
+{% block content %}
+<h1>Push destinations</h1>
+
+<div class="panel">
+  <p class="muted" style="margin-top:0;">
+    Every encrypted push goes to the <strong>primary</strong> GitHub destination plus all
+    <strong>enabled</strong> destinations below. The bundle is built once and fanned out —
+    each destination keeps its own copy, so adding a new one backfills on the next push.
+    Destinations from the <code>MIRROR_DESTINATIONS</code> environment variable are read-only here.
+  </p>
+  <table>
+    <tr><th>Label</th><th>Type</th><th>Owner</th><th>URL</th><th>Private</th><th>Enabled</th><th>Source</th><th>Last push</th><th></th></tr>
+    <tr>
+      <td><code>primary</code></td>
+      <td>github</td>
+      <td><code>{{ primary_owner }}</code></td>
+      <td class="muted">github.com</td>
+      <td>{{ "yes" if primary_private else "no" }}</td>
+      <td><span class="pill ok">always</span></td>
+      <td><span class="src environment">config</span></td>
+      <td>
+        {% set lp = last.get("primary") %}
+        {% if lp %}<span class="pill {{ 'ok' if lp['status']=='success' else 'err' if lp['status']=='failed' else 'mut' }}">{{ lp["status"] }}</span>
+        <span class="muted">{{ lp["finished_at"] }}</span>{% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td></td>
+    </tr>
+    {% for d in dests %}
+    <tr>
+      <td><code>{{ d["label"] }}</code></td>
+      <td>{{ d["type"] }}</td>
+      <td><code>{{ d["owner"] }}</code></td>
+      <td class="muted">{{ d["url"] }}</td>
+      <td>{{ "yes" if d["private"] else "no" }}</td>
+      <td>
+        {% if d["source"] == "ui" %}
+        <form class="inline" method="post" action="{{ url_for('destinations_toggle', label=d['label']) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn small" type="submit">{{ "disable" if d["enabled"] else "enable" }}</button>
+        </form>
+        {% else %}
+        <span class="pill {{ 'ok' if d['enabled'] else 'mut' }}">{{ "on" if d["enabled"] else "off" }}</span>
+        {% endif %}
+      </td>
+      <td><span class="src {{ d['source'] }}">{{ d["source"] }}</span></td>
+      <td>
+        {% set lp = last.get(d["label"]) %}
+        {% if lp %}<span class="pill {{ 'ok' if lp['status']=='success' else 'err' if lp['status']=='failed' else 'mut' }}">{{ lp["status"] }}</span>
+        <span class="muted">{{ lp["finished_at"] }}</span>{% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td style="white-space:nowrap;">
+        <form class="inline" method="post" action="{{ url_for('destinations_test', label=d['label']) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn small" type="submit">test</button>
+        </form>
+        {% if d["source"] == "ui" %}
+        <form class="inline" method="post" action="{{ url_for('destinations_delete', label=d['label']) }}"
+              onsubmit="return confirm('Delete destination {{ d['label'] }}? Mirrored repos stay in place.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn small danger" type="submit">delete</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if not dests %}
+  <p class="muted">No extra destinations yet — pushes go to the primary GitHub only.</p>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2>Add destination</h2>
+  <form method="post" action="{{ url_for('destinations_add') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field">
+      <label for="d-label">Label</label>
+      <input type="text" id="d-label" name="label" required maxlength="40" placeholder="e.g. backup-gh, codeberg">
+      <div class="hint">Unique name used in history, notifications and --dest.</div>
+    </div>
+    <div class="field">
+      <label for="d-type">Type</label>
+      <select id="d-type" name="type">
+        <option value="github">GitHub (second account / org)</option>
+        <option value="gitea">Gitea / Codeberg</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="d-url">Server URL</label>
+      <input type="text" id="d-url" name="url" placeholder="https://github.com or https://codeberg.org">
+      <div class="hint">Blank = default for the type. For Gitea the token owner's user is used for repo creation.</div>
+    </div>
+    <div class="field">
+      <label for="d-owner">Owner</label>
+      <input type="text" id="d-owner" name="owner" required placeholder="account or org that will own the mirrors">
+    </div>
+    <div class="field">
+      <label for="d-username">Git username</label>
+      <input type="text" id="d-username" name="username" placeholder="blank = same as owner">
+    </div>
+    <div class="field">
+      <label for="d-token">Token</label>
+      <input type="password" id="d-token" name="token" required autocomplete="new-password"
+             placeholder="personal access token with repo scope">
+      <div class="hint">Stored in the UI database, never displayed back. Use "test" after adding to verify it.</div>
+    </div>
+    <div class="field">
+      <label class="check"><input type="checkbox" name="private" checked> create mirrors as private</label>
+    </div>
+    <button class="btn primary" type="submit">Add destination</button>
+  </form>
+</div>
+{% endblock %}

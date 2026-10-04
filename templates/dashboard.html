@@ -61,6 +61,10 @@
     <span class="muted">Notifications:
       {% if notify_channels %}{% for c in notify_channels %}<span class="pill ok">{{ c }}</span>{% endfor %}{% else %}<span class="pill mut">off</span>{% endif %}
       — <a href="{{ url_for('config') }}">configure</a></span>
+    <span class="muted">Destinations: <span class="pill ok">primary</span>
+      {% for d in enabled_dests %}<span class="pill ok">{{ d["label"] }}</span>{% endfor %}
+      {% for d in dests if not d["enabled"] %}<span class="pill mut">{{ d["label"] }} off</span>{% endfor %}
+      — <a href="{{ url_for('destinations') }}">manage</a></span>
   </div>
 </div>
 
